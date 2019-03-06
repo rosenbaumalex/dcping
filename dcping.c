@@ -40,7 +40,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
-#include <inttypes.h>
+#include <arpa/inet.h>
 #include <rdma/rdma_cma.h>
 #include <infiniband/mlx5dv.h>
 
@@ -48,7 +48,7 @@ static int debug = 1;
 #define DEBUG_LOG if (debug) printf
 
 /*
- * pingmesh "RTT" loop:
+ * dcping "RTT" loop:
  * 	server listens for incoming connection requests
  * 	client connects to server
  * 	server accepts and replies with RDMA buffer: addr/rkey/len
@@ -61,7 +61,7 @@ static int debug = 1;
  * 		<repeat loop>
  */
 
-struct pingmesh_rdma_info {
+struct dcping_rdma_info {
 	__be64 addr;
 	__be32 rkey;
 	__be32 size;
@@ -80,13 +80,13 @@ struct pingmesh_rdma_info {
 #define _stringify( _x ) # _x
 #define stringify( _x ) _stringify( _x )
 
-#define PING_MSG_FMT           "pingmesh-%d: "
+#define PING_MSG_FMT           "dcping-%d: "
 #define PING_MIN_BUFSIZE       sizeof(stringify(INT_MAX)) + sizeof(PING_MSG_FMT)
 
 /*
  * Control block struct.
  */
-struct pingmesh_cb {
+struct dcping_cb {
 	int server;			/* 0 iff client */
 	struct ibv_comp_channel *channel;
 	struct ibv_cq *cq;
@@ -99,7 +99,7 @@ struct pingmesh_cb {
 	char *rdma_buf;			/* used as rdma sink */
 	struct ibv_mr *rdma_mr;
 
-	struct pingmesh_rdma_info rdma_info_for_remote;
+	struct dcping_rdma_info rdma_info_for_remote;
 
 	struct sockaddr_storage sin;
 	struct sockaddr_storage ssource;
@@ -129,7 +129,7 @@ struct rdma_event_channel *create_first_event_channel(void)
 }
 
 #if 0
-static int server_recv(struct pingmesh_cb *cb, struct ibv_wc *wc)
+static int server_recv(struct dcping_cb *cb, struct ibv_wc *wc)
 {
 	if (wc->byte_len != sizeof(cb->recv_buf)) {
 		fprintf(stderr, "Received bogus data, size %d\n", wc->byte_len);
@@ -150,7 +150,7 @@ static int server_recv(struct pingmesh_cb *cb, struct ibv_wc *wc)
 	return 0;
 }
 
-static int client_recv(struct pingmesh_cb *cb, struct ibv_wc *wc)
+static int client_recv(struct dcping_cb *cb, struct ibv_wc *wc)
 {
 	if (wc->byte_len != sizeof(cb->recv_buf)) {
 		fprintf(stderr, "Received bogus data, size %d\n", wc->byte_len);
@@ -165,7 +165,7 @@ static int client_recv(struct pingmesh_cb *cb, struct ibv_wc *wc)
 	return 0;
 }
 
-static int rping_cq_event_handler(struct pingmesh_cb *cb)
+static int rping_cq_event_handler(struct dcping_cb *cb)
 {
 	struct ibv_wc wc;
 	struct ibv_recv_wr *bad_wr;
@@ -241,7 +241,7 @@ error:
 }
 #endif
 
-static void rping_init_conn_param(struct pingmesh_cb *cb,
+static void dcping_init_conn_param(struct dcping_cb *cb,
 				  struct rdma_conn_param *conn_param)
 {
 	memset(conn_param, 0, sizeof(*conn_param));
@@ -252,10 +252,10 @@ static void rping_init_conn_param(struct pingmesh_cb *cb,
 	conn_param->qp_num = cb->qp->qp_num;
 
 	conn_param->private_data = &cb->rdma_info_for_remote; // server's reports it's RDMA buffer details
-	conn_param->private_data_len = sizeof(struct pingmesh_rdma_info);
+	conn_param->private_data_len = sizeof(struct dcping_rdma_info);
 }
 
-static int pingmesh_setup_buffers(struct pingmesh_cb *cb)
+static int dcping_setup_buffers(struct dcping_cb *cb)
 {
 	int ret;
 
@@ -295,14 +295,14 @@ err1:
 	return ret;
 }
 
-static void pingmesh_free_buffers(struct pingmesh_cb *cb)
+static void dcping_free_buffers(struct dcping_cb *cb)
 {
-	DEBUG_LOG("pingmesh_free_buffers called on cb %p\n", cb);
+	DEBUG_LOG("dcping_free_buffers called on cb %p\n", cb);
 	ibv_dereg_mr(cb->rdma_mr);
 	free(cb->rdma_buf);
 }
 
-static int pingmesh_create_qp(struct pingmesh_cb *cb)
+static int dcping_create_qp(struct dcping_cb *cb)
 {
         struct ibv_qp_init_attr_ex attr_ex;
         struct mlx5dv_qp_init_attr attr_dv;
@@ -355,7 +355,7 @@ static int pingmesh_create_qp(struct pingmesh_cb *cb)
 	return ret;
 }
 
-static int pingmesh_modify_qp(struct pingmesh_cb *cb)
+static int dcping_modify_qp(struct dcping_cb *cb)
 {
 	int attr_mask = 0;
 	int ret = 0;
@@ -439,7 +439,7 @@ static int pingmesh_modify_qp(struct pingmesh_cb *cb)
 	return ret;
 }
 
-static void pingmesh_free_qp(struct pingmesh_cb *cb)
+static void dcping_free_qp(struct dcping_cb *cb)
 {
 	if (cb->qp) ibv_destroy_qp(cb->qp);
 	if (cb->srq) ibv_destroy_srq(cb->srq);
@@ -448,10 +448,9 @@ static void pingmesh_free_qp(struct pingmesh_cb *cb)
 	ibv_dealloc_pd(cb->pd);
 }
 
-static int pingmesh_setup_qp(struct pingmesh_cb *cb)
+static int dcping_setup_qp(struct dcping_cb *cb)
 {
         struct ibv_srq_init_attr attr;
-        uint32_t srqn;
 	int ret;
 
 	cb->pd = ibv_alloc_pd(cb->cm_id->verbs);
@@ -497,21 +496,20 @@ static int pingmesh_setup_qp(struct pingmesh_cb *cb)
 			goto err3;
 		}
 
-		// ibv_get_srq_num(cb->srq, &srqn);
 		DEBUG_LOG("created srq %p\n", cb->srq);
 	}
 
-	ret = pingmesh_create_qp(cb);
+	ret = dcping_create_qp(cb);
 	if (ret) {
 		goto err4;
 	}
 
-	ret = pingmesh_modify_qp(cb);
+	ret = dcping_modify_qp(cb);
 	if (ret) {
 		goto err5;
 	}
 
-	DEBUG_LOG("created qp %p (qpn=%d)\n", cb->qp, (cb->qp ? cb->qp->qp_num : -1));
+	DEBUG_LOG("created qp %p (qpn=%d)\n", cb->qp, (cb->qp ? cb->qp->qp_num : (uint32_t)-1));
 	return 0;
 
 err5:
@@ -531,7 +529,7 @@ err1:
 #if 0
 static void *cq_thread(void *arg)
 {
-	struct pingmesh_cb *cb = arg;
+	struct dcping_cb *cb = arg;
 	struct ibv_cq *ev_cq;
 	void *ev_ctx;
 	int ret;
@@ -562,7 +560,7 @@ static void *cq_thread(void *arg)
 	}
 }
 
-static void rping_format_send(struct pingmesh_cb *cb, char *buf, struct ibv_mr *mr)
+static void rping_format_send(struct dcping_cb *cb, char *buf, struct ibv_mr *mr)
 {
 	struct rping_rdma_info *info = &cb->send_buf;
 
@@ -575,7 +573,7 @@ static void rping_format_send(struct pingmesh_cb *cb, char *buf, struct ibv_mr *
 }
 #endif
 
-static int pingmesh_handle_cm_event(struct pingmesh_cb *cb, enum rdma_cm_event_type *cm_event, struct rdma_cm_id **cm_id)
+static int dcping_handle_cm_event(struct dcping_cb *cb, enum rdma_cm_event_type *cm_event, struct rdma_cm_id **cm_id)
 {
         int ret;
         struct rdma_cm_event *event;
@@ -608,8 +606,8 @@ static int pingmesh_handle_cm_event(struct pingmesh_cb *cb, enum rdma_cm_event_t
 			break;
 
                 case RDMA_CM_EVENT_CONNECT_RESPONSE:
-			if (event->param.conn.private_data_len >= sizeof(struct pingmesh_rdma_info)) {
-				struct pingmesh_rdma_info *rdma_info_from_remote = (struct pingmesh_rdma_info *)event->param.conn.private_data;
+			if (event->param.conn.private_data_len >= sizeof(struct dcping_rdma_info)) {
+				struct dcping_rdma_info *rdma_info_from_remote = (struct dcping_rdma_info *)event->param.conn.private_data;
 //				   cb->rdma_info_for_remote.addr = be64toh((uint64_t) (unsigned long) cb->rdma_buf);
 				cb->size = be32toh(rdma_info_from_remote->size);
 				cb->rdma_mr->rkey = be32toh(rdma_info_from_remote->rkey);
@@ -636,7 +634,7 @@ static int pingmesh_handle_cm_event(struct pingmesh_cb *cb, enum rdma_cm_event_t
 	return ret;
 }
 
-static int pingmesh_bind_server(struct pingmesh_cb *cb)
+static int dcping_bind_server(struct dcping_cb *cb)
 {
 	int ret;
 	char str[INET_ADDRSTRLEN];
@@ -672,26 +670,26 @@ static int pingmesh_bind_server(struct pingmesh_cb *cb)
 	return 0;
 }
 
-static void free_cb(struct pingmesh_cb *cb)
+static void free_cb(struct dcping_cb *cb)
 {
 	free(cb);
 }
 
-static int pingmesh_run_server(struct pingmesh_cb *cb)
+static int dcping_run_server(struct dcping_cb *cb)
 {
 	int ret;
 
-	ret = pingmesh_bind_server(cb);
+	ret = dcping_bind_server(cb);
 	if (ret)
 		return ret;
 
-	ret = pingmesh_setup_qp(cb);
+	ret = dcping_setup_qp(cb);
 	if (ret) {
 		fprintf(stderr, "setup_qp failed: %d\n", ret);
 		return ret;
 	}
 
-	ret = pingmesh_setup_buffers(cb);
+	ret = dcping_setup_buffers(cb);
 	if (ret) {
 		fprintf(stderr, "setup_buffers failed: %d\n", ret);
 		goto err1;
@@ -703,23 +701,21 @@ static int pingmesh_run_server(struct pingmesh_cb *cb)
 	while (1)
 	{
 		struct rdma_cm_id *cm_id;
-		struct rdma_cm_event event;
 		enum rdma_cm_event_type cm_event;
 
 		DEBUG_LOG("waiting for client events ...\n");
-		ret = pingmesh_handle_cm_event(cb, &cm_event, &cm_id);
+		ret = dcping_handle_cm_event(cb, &cm_event, &cm_id);
 		switch (cm_event) {
 
 			case RDMA_CM_EVENT_CONNECT_REQUEST:
 				DEBUG_LOG("accepting client connection request (cm_id %p)\n", cm_id);
-				// ALEXR: reply with dctn and MKey
 
 				struct rdma_conn_param conn_param;
-				rping_init_conn_param(cb, &conn_param);
+				dcping_init_conn_param(cb, &conn_param);
 				ret = rdma_accept(cm_id, &conn_param);
 				if (ret) {
 					perror("rdma_accept");
-					return ret;
+					goto err2;
 				}
 				break;
 
@@ -743,14 +739,14 @@ static int pingmesh_run_server(struct pingmesh_cb *cb)
 
 	ret = 0;
 err2:
-	pingmesh_free_buffers(cb);
+	dcping_free_buffers(cb);
 err1:
-	pingmesh_free_qp(cb);
+	dcping_free_qp(cb);
 
 	return ret;
 }
 
-static int pingmesh_test_client(struct pingmesh_cb *cb)
+static int dcping_test_client(struct dcping_cb *cb)
 {
 	int ping, start, cc, i, ret = 0;
 	struct ibv_send_wr *bad_wr;
@@ -816,7 +812,7 @@ static int pingmesh_test_client(struct pingmesh_cb *cb)
 	return -1;
 }
 
-static int pingmesh_connect_client(struct pingmesh_cb *cb)
+static int dcping_connect_client(struct dcping_cb *cb)
 {
 	int ret;
 	struct rdma_cm_id *cm_id;
@@ -824,14 +820,14 @@ static int pingmesh_connect_client(struct pingmesh_cb *cb)
 	struct rdma_conn_param conn_param;
 
 	DEBUG_LOG("rdma_connecting...\n");
-	rping_init_conn_param(cb, &conn_param);
+	dcping_init_conn_param(cb, &conn_param);
 	ret = rdma_connect(cb->cm_id, &conn_param);
 	if (ret) {
 		perror("rdma_connect");
 		return ret;
 	}
 
-	ret = pingmesh_handle_cm_event(cb, &cm_event, &cm_id);
+	ret = dcping_handle_cm_event(cb, &cm_event, &cm_id);
 	if (cm_event != RDMA_CM_EVENT_CONNECT_RESPONSE) {
 		return -1;
 	}
@@ -846,7 +842,7 @@ static int pingmesh_connect_client(struct pingmesh_cb *cb)
 	return 0;
 }
 
-static int pingmesh_bind_client(struct pingmesh_cb *cb)
+static int dcping_bind_client(struct dcping_cb *cb)
 {
 	int ret;
 	struct rdma_cm_id *cm_id;
@@ -868,7 +864,7 @@ static int pingmesh_bind_client(struct pingmesh_cb *cb)
 		return ret;
 	}
 
-	ret = pingmesh_handle_cm_event(cb, &cm_event, &cm_id);
+	ret = dcping_handle_cm_event(cb, &cm_event, &cm_id);
 	if (cm_event != RDMA_CM_EVENT_ADDR_RESOLVED) {
 		return -1;
 	}
@@ -878,7 +874,7 @@ static int pingmesh_bind_client(struct pingmesh_cb *cb)
 		perror("rdma_resolve_route");
 	}
 
-	ret = pingmesh_handle_cm_event(cb, &cm_event, &cm_id);
+	ret = dcping_handle_cm_event(cb, &cm_event, &cm_id);
 	if (cm_event != RDMA_CM_EVENT_ROUTE_RESOLVED) {
 		return -1;
 	}
@@ -887,33 +883,33 @@ static int pingmesh_bind_client(struct pingmesh_cb *cb)
 	return 0;
 }
 
-static int pingmesh_run_client(struct pingmesh_cb *cb)
+static int dcping_run_client(struct dcping_cb *cb)
 {
 	int ret;
 
-	ret = pingmesh_bind_client(cb);
+	ret = dcping_bind_client(cb);
 	if (ret)
 		return ret;
 
-	ret = pingmesh_setup_qp(cb);
+	ret = dcping_setup_qp(cb);
 	if (ret) {
 		fprintf(stderr, "setup_qp failed: %d\n", ret);
 		return ret;
 	}
 
-	ret = pingmesh_setup_buffers(cb);
+	ret = dcping_setup_buffers(cb);
 	if (ret) {
 		fprintf(stderr, "rping_setup_buffers failed: %d\n", ret);
 		goto err1;
 	}
 
-	ret = pingmesh_connect_client(cb);
+	ret = dcping_connect_client(cb);
 	if (ret) {
 		fprintf(stderr, "connect error %d\n", ret);
 		goto err2;
 	}
 
-	ret = pingmesh_test_client(cb);
+	ret = dcping_test_client(cb);
 	if (ret) {
 		fprintf(stderr, "rping client failed: %d\n", ret);
 		goto err3;
@@ -923,9 +919,9 @@ static int pingmesh_run_client(struct pingmesh_cb *cb)
 err3:
 	rdma_disconnect(cb->cm_id);
 err2:
-	pingmesh_free_buffers(cb);
+	dcping_free_buffers(cb);
 err1:
-	pingmesh_free_qp(cb);
+	dcping_free_qp(cb);
 
 	return ret;
 }
@@ -971,7 +967,7 @@ static void usage(const char *name)
 
 int main(int argc, char *argv[])
 {
-	struct pingmesh_cb *cb;
+	struct dcping_cb *cb;
 	int op;
 	int ret = 0;
 
@@ -1043,7 +1039,7 @@ int main(int argc, char *argv[])
 		goto out;
 
 	if (cb->server == -1) {
-		usage("rping");
+		usage("dcping");
 		ret = EINVAL;
 		goto out;
 	}
@@ -1062,9 +1058,9 @@ int main(int argc, char *argv[])
 	DEBUG_LOG("created cm_id %p\n", cb->cm_id);
 
 	if (cb->server) {
-		ret = pingmesh_run_server(cb);
+		ret = dcping_run_server(cb);
 	} else {
-		ret = pingmesh_run_client(cb);
+		ret = dcping_run_client(cb);
 	}
 
 	DEBUG_LOG("destroy cm_id %p\n", cb->cm_id);

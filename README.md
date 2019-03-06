@@ -1,11 +1,14 @@
-# Build:
+# DC Ping RTT test
+
+## Build:
 ```sh
-$ gcc -o pingmesh pingmesh.c -libverbs -lrdmacm -lmlx5
+$ make clean
+$ make
 ```
 
-# Run Server:
+## Run Server:
 ```sh
-$ ./pingmesh -s -a 192.192.20.13
+$ ./dcping -s -a 192.192.20.13
 server
 created cm_id 0xbddf10
 rdma_bind_addr successful <192.192.20.13, 7174>
@@ -31,9 +34,9 @@ waiting for client events ...
 ^C
 ```
 
-# Run Client:
+## Run Client:
 ```sh
-$  ./pingmesh -c -a 192.192.20.13
+$  ./dcping -c -a 192.192.20.13
 client
 created cm_id 0x13c4f10
 got cm event: RDMA_CM_EVENT_ADDR_RESOLVED(0) cm_id 0x13c4f10
