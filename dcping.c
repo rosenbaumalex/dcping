@@ -87,19 +87,20 @@ struct dcping_rdma_info {
  * Control block struct.
  */
 struct dcping_cb {
-	int server;			/* 0 iff client */
+	int is_server;
 	struct ibv_comp_channel *channel;
 	struct ibv_cq *cq;
 	struct ibv_pd *pd;
-	struct ibv_srq *srq;
-	struct ibv_qp *qp;
+	struct ibv_srq *srq;		/* only for server (DCT) */
+	struct ibv_qp *qp;		/* DCI (client) or DCT (server) */
 
 	struct ibv_send_wr rdma_sq_wr;	/* rdma work request record */
 	struct ibv_sge rdma_sgl;	/* rdma single SGE */
-	char *rdma_buf;			/* used as rdma sink */
-	struct ibv_mr *rdma_mr;
-
-	struct dcping_rdma_info rdma_info_for_remote;
+	char          *local_buf_addr;
+	struct ibv_mr *local_buf_mr;
+	struct dcping_rdma_info remote_buf_info;
+	uint32_t		remote_qp_num;
+	struct ibv_ah *remote_ah;
 
 	struct sockaddr_storage sin;
 	struct sockaddr_storage ssource;
@@ -207,7 +208,7 @@ static int rping_cq_event_handler(struct dcping_cb *cb)
 
 		case IBV_WC_RECV:
 			DEBUG_LOG("recv completion\n");
-			ret = cb->server ? server_recv(cb, &wc) :
+			ret = cb->is_server ? server_recv(cb, &wc) :
 					   client_recv(cb, &wc);
 			if (ret) {
 				fprintf(stderr, "recv wc error: %d\n", ret);
@@ -251,7 +252,7 @@ static void dcping_init_conn_param(struct dcping_cb *cb,
 	conn_param->rnr_retry_count = 7;
 	conn_param->qp_num = cb->qp->qp_num;
 
-	conn_param->private_data = &cb->rdma_info_for_remote; // server's reports it's RDMA buffer details
+	conn_param->private_data = &cb->remote_buf_info; // server's reports it's RDMA buffer details
 	conn_param->private_data_len = sizeof(struct dcping_rdma_info);
 }
 
@@ -259,38 +260,41 @@ static int dcping_setup_buffers(struct dcping_cb *cb)
 {
 	int ret;
 
-	cb->rdma_buf = malloc(cb->size);
-	if (!cb->rdma_buf) {
-		fprintf(stderr, "rdma_buf malloc failed\n");
+	cb->local_buf_addr = malloc(cb->size);
+	if (!cb->local_buf_addr) {
+		fprintf(stderr, "local_buf_addr malloc failed\n");
 		ret = -ENOMEM;
 		goto err1;
 	}
 
-	cb->rdma_mr = ibv_reg_mr(cb->pd, cb->rdma_buf, cb->size,
+	cb->local_buf_mr = ibv_reg_mr(cb->pd, cb->local_buf_addr, cb->size,
 				 IBV_ACCESS_LOCAL_WRITE |
 				 IBV_ACCESS_REMOTE_READ |
 				 IBV_ACCESS_REMOTE_WRITE);
-	if (!cb->rdma_mr) {
-		fprintf(stderr, "rdma_buf reg_mr failed\n");
+	if (!cb->local_buf_mr) {
+		fprintf(stderr, "local_buf_addr reg_mr failed\n");
 		ret = errno;
 		goto err2;
 	}
 
-	cb->rdma_sgl.addr = (uint64_t) (unsigned long) cb->rdma_buf;
-	cb->rdma_sgl.lkey = cb->rdma_mr->lkey;
+	// ALEXR TODO check this
+	cb->rdma_sgl.addr = (uint64_t) (unsigned long) cb->local_buf_addr;
+	cb->rdma_sgl.lkey = cb->local_buf_mr->lkey;
 	cb->rdma_sq_wr.send_flags = IBV_SEND_SIGNALED;
 	cb->rdma_sq_wr.sg_list = &cb->rdma_sgl;
 	cb->rdma_sq_wr.num_sge = 1;
 
-	cb->rdma_info_for_remote.addr = htobe64((uint64_t) (unsigned long) cb->rdma_buf);
-	cb->rdma_info_for_remote.size = htobe32(cb->size);
-	cb->rdma_info_for_remote.rkey = htobe32(cb->rdma_mr->rkey);
+	if (cb->is_server) {
+		cb->remote_buf_info.addr = htobe64((uint64_t) (unsigned long) cb->local_buf_addr);
+		cb->remote_buf_info.size = htobe32(cb->size);
+		cb->remote_buf_info.rkey = htobe32(cb->local_buf_mr->rkey);
+	}
 
 	DEBUG_LOG("allocated & registered buffers...\n");
 	return 0;
 
 err2:
-	free(cb->rdma_buf);
+	free(cb->local_buf_addr);
 err1:
 	return ret;
 }
@@ -298,8 +302,8 @@ err1:
 static void dcping_free_buffers(struct dcping_cb *cb)
 {
 	DEBUG_LOG("dcping_free_buffers called on cb %p\n", cb);
-	ibv_dereg_mr(cb->rdma_mr);
-	free(cb->rdma_buf);
+	ibv_dereg_mr(cb->local_buf_mr);
+	free(cb->local_buf_addr);
 }
 
 static int dcping_create_qp(struct dcping_cb *cb)
@@ -318,14 +322,13 @@ static int dcping_create_qp(struct dcping_cb *cb)
 
 	attr_ex.comp_mask |= IBV_QP_INIT_ATTR_PD;
 	attr_ex.pd = cb->pd;
+	attr_ex.srq = cb->srq; /* will be NULL for client (DCI) */
 
-	if (cb->server) {
+	if (cb->is_server) {
 		/* create DCT */
 		attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_DC;
 		attr_dv.dc_init_attr.dc_type = MLX5DV_DCTYPE_DCT;
 		attr_dv.dc_init_attr.dct_access_key = DC_KEY;
-
-		attr_ex.srq = cb->srq;
 
 		cb->qp = mlx5dv_create_qp(cb->cm_id->verbs, &attr_ex, &attr_dv);
 	}
@@ -370,7 +373,7 @@ static int dcping_modify_qp(struct dcping_cb *cb)
 			.port_num        = 1
 		};
 
-		if (cb->server) {
+		if (cb->is_server) {
 			attr_mask |= IBV_QP_ACCESS_FLAGS;
 			attr.qp_access_flags = IBV_ACCESS_REMOTE_WRITE | 
 					       IBV_ACCESS_REMOTE_READ | 
@@ -402,7 +405,7 @@ static int dcping_modify_qp(struct dcping_cb *cb)
 			}
 		};
 
-		if (cb->server) {
+		if (cb->is_server) {
 			attr_mask |= IBV_QP_MIN_RNR_TIMER;
 		}
 
@@ -413,7 +416,7 @@ static int dcping_modify_qp(struct dcping_cb *cb)
 		}
 	}
 
-	if (!cb->server) {
+	if (!cb->is_server) {
 		/* modify QP to RTS */
 		attr_mask = IBV_QP_STATE | IBV_QP_TIMEOUT |
 			IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
@@ -484,7 +487,7 @@ static int dcping_setup_qp(struct dcping_cb *cb)
 		goto err3;
 	}
 
-	if (cb->server) 
+	if (cb->is_server) 
 	{
 		memset(&attr, 0, sizeof(attr));
 		attr.attr.max_wr = 2;
@@ -607,13 +610,15 @@ static int dcping_handle_cm_event(struct dcping_cb *cb, enum rdma_cm_event_type 
 
                 case RDMA_CM_EVENT_CONNECT_RESPONSE:
 			if (event->param.conn.private_data_len >= sizeof(struct dcping_rdma_info)) {
-				struct dcping_rdma_info *rdma_info_from_remote = (struct dcping_rdma_info *)event->param.conn.private_data;
-//				   cb->rdma_info_for_remote.addr = be64toh((uint64_t) (unsigned long) cb->rdma_buf);
-				cb->size = be32toh(rdma_info_from_remote->size);
-				cb->rdma_mr->rkey = be32toh(rdma_info_from_remote->rkey);
+				struct rdma_conn_param *conn_param = &event->param.conn;
+				struct dcping_rdma_info *remote_buf_info = (struct dcping_rdma_info *)conn_param->private_data;
 
-			DEBUG_LOG("GOT SIZE=%d, RKEY=%d\n", cb->size, cb->rdma_mr->rkey);
+				cb->remote_qp_num = conn_param->qp_num;
+				cb->remote_buf_info.addr = be64toh(remote_buf_info->addr);
+				cb->remote_buf_info.size = be32toh(remote_buf_info->size);
+				cb->remote_buf_info.rkey = be32toh(remote_buf_info->rkey);
 
+				DEBUG_LOG("GOT dctn=%d, buf=%p, size=%d, rkey=%d\n", cb->remote_qp_num, cb->remote_buf_info.addr, cb->remote_buf_info.size, cb->remote_buf_info.rkey);
 			}
 			break;
 
@@ -629,8 +634,6 @@ static int dcping_handle_cm_event(struct dcping_cb *cb, enum rdma_cm_event_type 
                         break;
         }
         rdma_ack_cm_event(event);
-        if (ret)
-                exit(ret);
 	return ret;
 }
 
@@ -724,7 +727,7 @@ static int dcping_run_server(struct dcping_cb *cb)
 				break;
 
 			case RDMA_CM_EVENT_DISCONNECTED:
-				DEBUG_LOG("%s DISCONNECT EVENT (cm_id %p)\n", cb->server ? "server" : "client", cm_id);
+				DEBUG_LOG("%s DISCONNECT EVENT (cm_id %p)\n", cb->is_server ? "server" : "client", cm_id);
 				rdma_disconnect(cm_id);
 				rdma_destroy_id(cm_id);
 				break;
@@ -787,7 +790,7 @@ static int dcping_test_client(struct dcping_cb *cb)
 			break;
 		}
 
-		rping_format_send(cb, cb->rdma_buf, cb->rdma_mr);
+		rping_format_send(cb, cb->local_buf_addr, cb->local_buf_mr);
 		ret = ibv_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 		if (ret) {
 			fprintf(stderr, "post send error %d\n", ret);
@@ -804,7 +807,7 @@ static int dcping_test_client(struct dcping_cb *cb)
 		}
 
 		if (cb->verbose)
-			printf("ping data: %s\n", cb->rdma_buf);
+			printf("ping data: %s\n", cb->local_buf_addr);
 	}
 
 	return (cb->state == DISCONNECTED) ? 0 : ret;
@@ -815,6 +818,8 @@ static int dcping_test_client(struct dcping_cb *cb)
 static int dcping_connect_client(struct dcping_cb *cb)
 {
 	int ret;
+	int qp_attr_mask;
+	struct ibv_qp_attr qp_attr;
 	struct rdma_cm_id *cm_id;
 	enum rdma_cm_event_type cm_event;
 	struct rdma_conn_param conn_param;
@@ -828,9 +833,24 @@ static int dcping_connect_client(struct dcping_cb *cb)
 	}
 
 	ret = dcping_handle_cm_event(cb, &cm_event, &cm_id);
-	if (cm_event != RDMA_CM_EVENT_CONNECT_RESPONSE) {
-		return -1;
+	if (ret || cm_event != RDMA_CM_EVENT_CONNECT_RESPONSE) {
+		perror("rdma_connect wrong responce");
+		return ret;
 	}
+
+	qp_attr.qp_state = IBV_QPS_RTR;
+	ret = rdma_init_qp_attr(cb->cm_id, &qp_attr, &qp_attr_mask);
+	if (ret) {
+		perror("rdma_init_qp_attr");
+		return ret;
+	}
+
+	cb->remote_ah = ibv_create_ah(cb->pd, &qp_attr.ah_attr);
+	if (!cb->remote_ah) {
+		perror("ibv_create_ah");
+		return ret;
+	}
+	DEBUG_LOG("created ah (%p)\n", cb->remote_ah);
 
 	ret = rdma_establish(cb->cm_id);
 	if (ret) {
@@ -950,13 +970,13 @@ static int get_addr(char *dst, struct sockaddr *addr)
 
 static void usage(const char *name)
 {
-	printf("%s -s [-vVd] [-S size] [-C count] [-a addr] [-p port]\n", 
+	printf("%s -s [-a addr] [-vVd] [-S size] [-C count] [-p port]\n", 
 	       basename(name));
-	printf("%s -c [-vVd] [-S size] [-C count] [-I addr] -a addr [-p port]\n", 
+	printf("%s -c -a addr [-vVd] [-S size] [-C count] [-I addr] [-p port]\n", 
 	       basename(name));
 	printf("\t-c\t\tclient side\n");
 	printf("\t-I\t\tSource address to bind to for client.\n");
-	printf("\t-s\t\tserver side.  To bind to any address with IPv6 use -a ::0\n");
+	printf("\t-s\t\tserver side. To bind to any address with IPv6 use -a ::0\n");
 	printf("\t-v\t\tdisplay ping data to stdout\n");
 	printf("\t-d\t\tdebug printfs\n");
 	printf("\t-S size \tping data size\n");
@@ -976,7 +996,7 @@ int main(int argc, char *argv[])
 		return -ENOMEM;
 
 	memset(cb, 0, sizeof(*cb));
-	cb->server = -1;
+	cb->is_server = -1;
 	cb->size = 64;
 	cb->sin.ss_family = PF_INET;
 	cb->port = htobe16(7174);
@@ -995,11 +1015,11 @@ int main(int argc, char *argv[])
 			DEBUG_LOG("port %d\n", (int) atoi(optarg));
 			break;
 		case 's':
-			cb->server = 1;
+			cb->is_server = 1;
 			DEBUG_LOG("server\n");
 			break;
 		case 'c':
-			cb->server = 0;
+			cb->is_server = 0;
 			DEBUG_LOG("client\n");
 			break;
 		case 'S':
@@ -1038,7 +1058,7 @@ int main(int argc, char *argv[])
 	if (ret)
 		goto out;
 
-	if (cb->server == -1) {
+	if (cb->is_server == -1) {
 		usage("dcping");
 		ret = EINVAL;
 		goto out;
@@ -1057,7 +1077,7 @@ int main(int argc, char *argv[])
 	}
 	DEBUG_LOG("created cm_id %p\n", cb->cm_id);
 
-	if (cb->server) {
+	if (cb->is_server) {
 		ret = dcping_run_server(cb);
 	} else {
 		ret = dcping_run_client(cb);
