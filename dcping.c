@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <limits.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -44,7 +45,7 @@
 #include <rdma/rdma_cma.h>
 #include <infiniband/mlx5dv.h>
 
-static int debug = 1;
+static int debug = 0;
 static int debug_fast_path = 0;
 #define DEBUG_LOG if (debug) printf
 #define DEBUG_LOG_FAST_PATH if (debug_fast_path) printf
@@ -91,7 +92,6 @@ struct dcping_rdma_info {
  * Control block struct.
  */
 struct dcping_cb {
-	int verbose;			/* verbose logging */
 	int count;			/* ping count */
 	int size;			/* ping data size */
 	int is_server;
@@ -112,8 +112,6 @@ struct dcping_cb {
 					/* listener on service side. */
 
 	uint64_t hw_clocks_kHz;
-	struct ibv_send_wr rdma_sq_wr;	/* rdma work request record */
-	struct ibv_sge rdma_sgl;	/* rdma single SGE */
 	char          *local_buf_addr;
 	struct ibv_mr *local_buf_mr;
 	struct dcping_rdma_info remote_buf_info;
@@ -172,12 +170,6 @@ static int dcping_setup_buffers(struct dcping_cb *cb)
 		ret = errno;
 		goto err2;
 	}
-
-	cb->rdma_sgl.addr = (uint64_t) (unsigned long) cb->local_buf_addr;
-	cb->rdma_sgl.lkey = cb->local_buf_mr->lkey;
-	cb->rdma_sq_wr.send_flags = IBV_SEND_SIGNALED;
-	cb->rdma_sq_wr.sg_list = &cb->rdma_sgl;
-	cb->rdma_sq_wr.num_sge = 1;
 
 	if (cb->is_server) {
 		cb->remote_buf_info.addr = htobe64((uint64_t) (unsigned long) cb->local_buf_addr);
@@ -576,6 +568,8 @@ static int dcping_run_server(struct dcping_cb *cb)
 		goto err1;
 	}
 
+	printf("server ready, waiting for client connection requests...\n");
+
 	// main loop:
 	// 	wait for CONN REQ
 	// 	accept with dctn and MKey
@@ -601,7 +595,7 @@ static int dcping_run_server(struct dcping_cb *cb)
 				break;
 
 			case RDMA_CM_EVENT_ESTABLISHED:
-				DEBUG_LOG("client connection established (cm_id %p)\n", cm_id);
+				printf("client connection established (cm_id %p)\n", cm_id);
 				break;
 
 			case RDMA_CM_EVENT_DISCONNECTED:
@@ -752,7 +746,11 @@ static int dcping_test_client(struct dcping_cb *cb)
 	uint64_t ts_hw_start, ts_hw_end;
 	uint64_t rtt_nsec, rtt_hw;
 
-	DEBUG_LOG("start RDMA Write testing\n");
+	uint64_t rtt_nsec_min = ULLONG_MAX;
+	uint64_t rtt_nsec_max = 0;
+	uint64_t rtt_nsec_total = 0;
+
+	printf("connected to server, starting RTT test\n");
 
 	for (ping = 0; !cb->count || ping < cb->count; ping++) {
 		/* initiate RDMA Write x2 ops to create tiemstamp CQE's */
@@ -771,14 +769,21 @@ static int dcping_test_client(struct dcping_cb *cb)
 
 		/* clac RTT */
 		rtt_hw = ts_hw_end - ts_hw_start;
-
 		rtt_nsec = rtt_hw * USEC_PER_SEC / cb->hw_clocks_kHz;
+		printf("\r[iter =%4d] rtt = %d.%3.3d usec", ping, rtt_nsec/1000, rtt_nsec%1000); fflush(stdout);
 
-		DEBUG_LOG("[iter =%4d] rtt = %8d nsec (rtt_hw =%4d)\n", ping, rtt_nsec, rtt_hw);
+		rtt_nsec_total += rtt_nsec;
+		if (rtt_nsec_min > rtt_nsec) rtt_nsec_min = rtt_nsec;
+		if (rtt_nsec_max < rtt_nsec) rtt_nsec_max = rtt_nsec;
 
 		usleep(100 * 1000);
 	}
-	DEBUG_LOG("done RDMA Write testing\n");
+
+	printf("\r[total = %d] rtt = %d.%3.3d / %d.%3.3d / %d.%3.3d usec <min/avg/max>\n", ping, 
+		(rtt_nsec_min)/1000, (rtt_nsec_min)%1000, 
+		(rtt_nsec_total/ping)/1000, (rtt_nsec_total/ping)%1000,
+		(rtt_nsec_max)/1000, (rtt_nsec_max)%1000);
+	printf("done DC RTT test\n");
 
 	return 0;
 }
@@ -803,6 +808,7 @@ static int dcping_connect_client(struct dcping_cb *cb)
 	ret = dcping_handle_cm_event(cb, &cm_event, &cm_id);
 	if (ret || cm_event != RDMA_CM_EVENT_CONNECT_RESPONSE) {
 		perror("rdma_connect wrong responce");
+		ret = errno;
 		return ret;
 	}
 
@@ -810,12 +816,14 @@ static int dcping_connect_client(struct dcping_cb *cb)
 	ret = rdma_init_qp_attr(cb->cm_id, &qp_attr, &qp_attr_mask);
 	if (ret) {
 		perror("rdma_init_qp_attr");
+		ret = errno;
 		return ret;
 	}
 
 	cb->ah = ibv_create_ah(cb->pd, &qp_attr.ah_attr);
 	if (!cb->ah) {
 		perror("ibv_create_ah");
+		ret = errno;
 		return ret;
 	}
 	DEBUG_LOG("created ah (%p)\n", cb->ah);
@@ -823,6 +831,7 @@ static int dcping_connect_client(struct dcping_cb *cb)
 	ret = rdma_establish(cb->cm_id);
 	if (ret) {
 		perror("rdma_establish");
+		ret = errno;
 		return ret;
 	}
 
@@ -1012,7 +1021,7 @@ int main(int argc, char *argv[])
 				DEBUG_LOG("count %d\n", (int) cb->count);
 			break;
 		case 'v':
-			cb->verbose++;
+			debug++;
 			DEBUG_LOG("verbose\n");
 			break;
 		case 'd':

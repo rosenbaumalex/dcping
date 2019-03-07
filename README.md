@@ -8,66 +8,56 @@ $ make
 
 ## Run Server:
 ```sh
-$ ./dcping -s -a 192.192.20.13
-server
-created cm_id 0xbddf10
+$ ./dcping -s -a 192.192.20.13 -v
+verbose
+created cm_id 0x18aaef0
 rdma_bind_addr successful <192.192.20.13, 7174>
 rdma_listen
-created pd 0xbddb30
-created channel 0xbddb60
-created cq 0xbe13d0
-created srq 0xbe15f8
-created qp 0xbe50a8 (qpn=4359)
+created pd 0x18aa5c0
+created channel 0x18aab30
+created cq 0x18ae3b0
+hw_clocks_kHz = 78125
+created srq 0x18ae5d8
+created qp 0x18b2018 (qpn=4556)
 allocated & registered buffers...
+server ready, waiting for client connection requests...
 waiting for client events ...
 
-
-got cm event: RDMA_CM_EVENT_CONNECT_REQUEST(4) cm_id 0xbe54f0
-accepting client connection request (cm_id 0xbe54f0)
+got cm event: RDMA_CM_EVENT_CONNECT_REQUEST(4) cm_id 0x18b2560
+accepting client connection request (cm_id 0x18b2560)
 waiting for client events ...
-got cm event: RDMA_CM_EVENT_ESTABLISHED(9) cm_id 0xbe54f0
-client connection established (cm_id 0xbe54f0)
+got cm event: RDMA_CM_EVENT_ESTABLISHED(9) cm_id 0x18b2560
+client connection established (cm_id 0x18b2560)
 waiting for client events ...
-got cm event: RDMA_CM_EVENT_DISCONNECTED(10) cm_id 0xbe54f0
-server DISCONNECT EVENT (cm_id 0xbe54f0)
+got cm event: RDMA_CM_EVENT_DISCONNECTED(10) cm_id 0x18b2560
+server DISCONNECT EVENT (cm_id 0x18b2560)
 waiting for client events ...
 ^C
 ```
 
 ## Run Client:
 ```sh
-$ ./dcping -c -a 192.192.20.13 -C 10
-client
-count 10
-size 1000
-created cm_id 0x6ecef0
-got cm event: RDMA_CM_EVENT_ADDR_RESOLVED(0) cm_id 0x6ecef0
-got cm event: RDMA_CM_EVENT_ROUTE_RESOLVED(2) cm_id 0x6ecef0
+$ ./dcping -c -a 192.192.20.13 -C 10 -v
+verbose
+created cm_id 0x1473ef0
+got cm event: RDMA_CM_EVENT_ADDR_RESOLVED(0) cm_id 0x1473ef0
+got cm event: RDMA_CM_EVENT_ROUTE_RESOLVED(2) cm_id 0x1473ef0
 rdma_resolve_addr/rdma_resolve_route successful
-created pd 0x6ec370
-created channel 0x6ec330
-created cq 0x6f0570
+created pd 0x1476170
+created channel 0x1473560
+created cq 0x1477520
 hw_clocks_kHz = 78125
-created qp 0x6f0798 (qpn=205)
+created qp 0x1477748 (qpn=288)
 allocated & registered buffers...
 rdma_connecting...
-got cm event: RDMA_CM_EVENT_CONNECT_RESPONSE(5) cm_id 0x6ecef0
-GOT dctn=4452, buf=0x1c543c0, size=1020, rkey=307835
-created ah (0x6f0ec0)
+got cm event: RDMA_CM_EVENT_CONNECT_RESPONSE(5) cm_id 0x1473ef0
+GOT dctn=4556, buf=0x18b2330, size=64, rkey=600712
+created ah (0x1476260)
 rdma_connect successful
-start RDMA Write testing
-[iter =   0] rtt =      870 nsec (rtt_hw =  68)
-[iter =   1] rtt =       12 nsec (rtt_hw =   1)
-[iter =   2] rtt =       25 nsec (rtt_hw =   2)
-[iter =   3] rtt =       12 nsec (rtt_hw =   1)
-[iter =   4] rtt =       64 nsec (rtt_hw =   5)
-[iter =   5] rtt =       25 nsec (rtt_hw =   2)
-[iter =   6] rtt =       64 nsec (rtt_hw =   5)
-[iter =   7] rtt =       12 nsec (rtt_hw =   1)
-[iter =   8] rtt =      320 nsec (rtt_hw =  25)
-[iter =   9] rtt =      320 nsec (rtt_hw =  25)
-done RDMA Write testing
-dcping_free_buffers called on cb 0x6ec3c0
-dcping_free_qp/srq/cq/pd called on cb 0x6ec3c0
-destroy cm_id 0x6ecef0
+connected to server, starting RTT test
+[total = 10] rtt = 0.012 / 0.044 / 0.281 usec <min/avg/max>
+done DC RTT test
+dcping_free_buffers called on cb 0x14733c0
+dcping_free_qp/srq/cq/pd called on cb 0x14733c0
+destroy cm_id 0x1473ef0
 ```
