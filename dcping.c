@@ -45,7 +45,9 @@
 #include <infiniband/mlx5dv.h>
 
 static int debug = 1;
+static int debug_fast_path = 0;
 #define DEBUG_LOG if (debug) printf
+#define DEBUG_LOG_FAST_PATH if (debug_fast_path) printf
 
 /*
  * dcping "RTT" loop:
@@ -83,6 +85,8 @@ struct dcping_rdma_info {
 #define PING_MSG_FMT           "dcping-%d: "
 #define PING_MIN_BUFSIZE       sizeof(stringify(INT_MAX)) + sizeof(PING_MSG_FMT)
 
+#define USEC_PER_SEC    1000000L
+
 /*
  * Control block struct.
  */
@@ -92,6 +96,7 @@ struct dcping_cb {
 	int size;			/* ping data size */
 	int is_server;
 
+	/* verbs stuff */
 	struct ibv_comp_channel *channel;
 	struct ibv_cq_ex *cq;
 	struct ibv_pd *pd;
@@ -101,6 +106,12 @@ struct dcping_cb {
         struct mlx5dv_qp_ex *mqpex;	/* client only */
 	struct ibv_ah *ah;		/* client only */
 
+	/* CM stuff */
+	struct rdma_event_channel *cm_channel;
+	struct rdma_cm_id *cm_id;	/* connection on client side,*/
+					/* listener on service side. */
+
+	uint64_t hw_clocks_kHz;
 	struct ibv_send_wr rdma_sq_wr;	/* rdma work request record */
 	struct ibv_sge rdma_sgl;	/* rdma single SGE */
 	char          *local_buf_addr;
@@ -111,11 +122,6 @@ struct dcping_cb {
 	struct sockaddr_storage sin;
 	struct sockaddr_storage ssource;
 	__be16 port;			/* dst port in NBO */
-
-	/* CM stuff */
-	struct rdma_event_channel *cm_channel;
-	struct rdma_cm_id *cm_id;	/* connection on client side,*/
-					/* listener on service side. */
 };
 
 struct rdma_event_channel *create_first_event_channel(void)
@@ -346,6 +352,7 @@ static int dcping_modify_qp(struct dcping_cb *cb)
 
 static void dcping_free_qp(struct dcping_cb *cb)
 {
+	DEBUG_LOG("dcping_free_qp/srq/cq/pd called on cb %p\n", cb);
 	if (cb->qp) ibv_destroy_qp(cb->qp);
 	if (cb->srq) ibv_destroy_srq(cb->srq);
 	ibv_destroy_cq(ibv_cq_ex_to_cq(cb->cq));
@@ -355,8 +362,9 @@ static void dcping_free_qp(struct dcping_cb *cb)
 
 static int dcping_setup_qp(struct dcping_cb *cb)
 {
-	struct ibv_cq_init_attr_ex cq_attr_ex;
 	int ret;
+	struct ibv_cq_init_attr_ex cq_attr_ex;
+	struct ibv_device_attr_ex device_attr_ex = {};
 
 	cb->pd = ibv_alloc_pd(cb->cm_id->verbs);
 	if (!cb->pd) {
@@ -387,6 +395,21 @@ static int dcping_setup_qp(struct dcping_cb *cb)
 		goto err2;
 	}
 	DEBUG_LOG("created cq %p\n", cb->cq);
+
+	ret = ibv_query_device_ex(cb->cm_id->verbs, NULL, &device_attr_ex);
+	if (ret) {
+		fprintf(stderr, "ibv_query_device_ex failed\n");
+		ret = errno;
+		goto err3;
+	}
+	if (!device_attr_ex.hca_core_clock) {
+		fprintf(stderr, "hca_core_clock = 0\n");
+		ret = errno;
+		goto err3;
+	}
+
+	cb->hw_clocks_kHz = device_attr_ex.hca_core_clock;
+	DEBUG_LOG("hw_clocks_kHz = %u\n", cb->hw_clocks_kHz);
 
 	if (cb->is_server) 
 	{
@@ -614,10 +637,8 @@ static int dcping_client_dc_send_wr(struct dcping_cb *cb, uint64_t wr_id)
 	mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->remote_qp_num, DC_KEY);
 	ibv_wr_set_sge(cb->qpex, cb->local_buf_mr->lkey,
 			(uintptr_t)cb->local_buf_addr, 1);
-	ibv_wr_complete(cb->qpex);
 
 	/* 2nd SIZE x RDMA Write, this will create cqe->ts_end */
-        ibv_wr_start(cb->qpex);
         ibv_wr_rdma_write(cb->qpex, cb->remote_buf_info.rkey, cb->remote_buf_info.addr);
         mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->remote_qp_num, DC_KEY);
         ibv_wr_set_sge(cb->qpex, cb->local_buf_mr->lkey,
@@ -640,14 +661,14 @@ static int dcping_client_wait_cq_event(struct dcping_cb *cb)
 		ret = errno;
 		return ret;
 	}
-	DEBUG_LOG("waiting for cq event...\n");
+	DEBUG_LOG_FAST_PATH("waiting for cq event...\n");
 	if (ibv_get_cq_event(cb->channel, &ev_cq, &ev_ctx)) {
 		perror("ibv_get_cq_event");
 		ret = errno;
 		return ret;
 	}
 	ibv_ack_cq_events(ibv_cq_ex_to_cq(cb->cq), 1);
-	DEBUG_LOG("got someting.. checking\n");
+	DEBUG_LOG_FAST_PATH("got someting.. checking\n");
 
 	if ((ev_ctx != cb) || (ev_cq != ibv_cq_ex_to_cq(cb->cq))) {
 		fprintf(stderr, "ibv_get_cq_event return with wrong cq_ctx (%p) or wrong ibv_cq_ctx (%p)\n", ev_ctx, ev_cq);
@@ -679,15 +700,15 @@ static int dcping_client_process_cqe(struct dcping_cb *cb, uint64_t wr_id, uint6
 	return 0;
 }
 
-static int dcping_client_get_cqe_tiemstmp(struct dcping_cb *cb, uint64_t wr_id, uint64_t *ts_start, uint64_t *ts_end)
+static int dcping_client_get_cqe_tiemstmp(struct dcping_cb *cb, uint64_t wr_id, uint64_t *ts_hw_start, uint64_t *ts_hw_end)
 {
 	/* we expect 2 cqe matching wr_id's to input */
 
 	int ret, step=0;
-	uint64_t ts;
-	struct ibv_poll_cq_attr cq_attr;
+	uint64_t ts_hw;
+	struct ibv_poll_cq_attr cq_attr = {};
 
-	*ts_start = *ts_end = 0;
+	*ts_hw_start = *ts_hw_end = 0;
 
 	do {
 		ret = ibv_start_poll(cb->cq, &cq_attr);
@@ -705,21 +726,22 @@ static int dcping_client_get_cqe_tiemstmp(struct dcping_cb *cb, uint64_t wr_id, 
 			return ret;
 		}
 
-		DEBUG_LOG("processing cqe (step %d)\n", step);
-		ret = dcping_client_process_cqe(cb, wr_id, &ts);
+		ret = dcping_client_process_cqe(cb, wr_id, &ts_hw);
 		ibv_end_poll(cb->cq);
+
+		DEBUG_LOG_FAST_PATH("processing cqe (step %d) ts_hw = %u\n", step, ts_hw);
 
 		if (ret)
 			return ret;
 
 		if (step == 0)
-			*ts_start = ts;
+			*ts_hw_start = ts_hw;
 		else
-			*ts_end = ts;
+			*ts_hw_end = ts_hw;
 
 		step++;
 
-	} while (step < 1);
+	} while (step < 2);
 
 	return 0;
 }
@@ -727,28 +749,34 @@ static int dcping_client_get_cqe_tiemstmp(struct dcping_cb *cb, uint64_t wr_id, 
 static int dcping_test_client(struct dcping_cb *cb)
 {
 	int ping, ret = 0;
-	uint64_t ts_start, ts_end, rtt;
+	uint64_t ts_hw_start, ts_hw_end;
+	uint64_t rtt_nsec, rtt_hw;
 
 	DEBUG_LOG("start RDMA Write testing\n");
 
 	for (ping = 0; !cb->count || ping < cb->count; ping++) {
 		/* initiate RDMA Write x2 ops to create tiemstamp CQE's */
-		DEBUG_LOG("before post send \n");
+		DEBUG_LOG_FAST_PATH("before post send \n");
 		ret = dcping_client_dc_send_wr(cb, ping);
 		if (ret) {
 			DEBUG_LOG("dc send error :(\n");
 		}
 
 		/* wait for CQE's with timestamp */
-		DEBUG_LOG("before cqe check\n");
-		ret = dcping_client_get_cqe_tiemstmp(cb, ping, &ts_start, &ts_end);
+		DEBUG_LOG_FAST_PATH("before cqe check\n");
+		ret = dcping_client_get_cqe_tiemstmp(cb, ping, &ts_hw_start, &ts_hw_end);
 		if (ret) {
 			DEBUG_LOG("cqe processing failed :(\n");
 		}
 
 		/* clac RTT */
-		rtt = ts_end - ts_start;
-		DEBUG_LOG("rtt = %d\n", rtt);
+		rtt_hw = ts_hw_end - ts_hw_start;
+
+		rtt_nsec = rtt_hw * USEC_PER_SEC / cb->hw_clocks_kHz;
+
+		DEBUG_LOG("[iter =%4d] rtt = %8d nsec (rtt_hw =%4d)\n", ping, rtt_nsec, rtt_hw);
+
+		usleep(100 * 1000);
 	}
 	DEBUG_LOG("done RDMA Write testing\n");
 
@@ -937,7 +965,7 @@ int main(int argc, char *argv[])
 
 	memset(cb, 0, sizeof(*cb));
 	cb->is_server = -1;
-	cb->count = 10;
+	cb->count = 1;
 	cb->size = 64;
 	cb->sin.ss_family = PF_INET;
 	cb->port = htobe16(7174);
