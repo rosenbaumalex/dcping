@@ -698,14 +698,14 @@ static int dcping_client_process_cqe(struct dcping_cb *cb, uint64_t wr_id, uint6
 	*ts_out = 0;
 
 	if (cb->cq->status !=  IBV_WC_SUCCESS) {
-		fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
+		fprintf(stderr, "CQ failed with status '%s' (%d) for wr_id %d\n",
 				ibv_wc_status_str(cb->cq->status),
 				cb->cq->status, (int)cb->cq->wr_id);
 		return -1;
 	}
 
 	if (cb->cq->wr_id != wr_id) {
-		fprintf(stderr, "Failed wr_id compare %s (%d) for cqe->wr_id(%d) vs wr_id(%d)\n",
+		fprintf(stderr, "CQ failed wr_id compare '%s' (%d) for cqe->wr_id(%d) vs wr_id(%d)\n",
 				ibv_wc_status_str(cb->cq->status), cb->cq->status,
 				(int)cb->cq->wr_id, wr_id);
 		return -1;
@@ -786,6 +786,7 @@ static int dcping_test_client(struct dcping_cb *cb)
 		ret = dcping_client_get_cqe_tiemstmp(cb, ping, &ts_hw_start, &ts_hw_end);
 		if (ret) {
 			DEBUG_LOG("cqe processing failed :(\n");
+			return ret;
 		}
 
 		/* clac RTT */
