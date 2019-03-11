@@ -68,6 +68,7 @@ struct dcping_rdma_info {
 	__be64 addr;
 	__be32 rkey;
 	__be32 size;
+	__be32 dctn;
 };
 
 /*
@@ -94,6 +95,7 @@ struct dcping_rdma_info {
 struct dcping_cb {
 	int count;			/* ping count */
 	int size;			/* ping data size */
+	int delay_usec;
 	int is_server;
 
 	/* verbs stuff */
@@ -115,7 +117,6 @@ struct dcping_cb {
 	char          *local_buf_addr;
 	struct ibv_mr *local_buf_mr;
 	struct dcping_rdma_info remote_buf_info;
-	uint32_t		remote_qp_num;
 
 	struct sockaddr_storage sin;
 	struct sockaddr_storage ssource;
@@ -137,17 +138,29 @@ struct rdma_event_channel *create_first_event_channel(void)
 }
 
 static void dcping_init_conn_param(struct dcping_cb *cb,
-				  struct rdma_conn_param *conn_param)
+				   struct rdma_cm_id *cm_id,
+				   struct rdma_conn_param *conn_param)
 {
+	uint32_t qp_num = 0;
+
+	if (cb->is_server) {
+		// fake a unique qp_num based on peer's IP addr + UDP port as we're
+		// using the same DCT as an external QPN from all RDMA_CM connection
+		qp_num = (((struct sockaddr_in *)rdma_get_peer_addr(cm_id))->sin_addr.s_addr) << 16;
+		qp_num |=  be16toh(rdma_get_dst_port(cm_id));
+	} else {
+		qp_num = cb->qp->qp_num;
+	}
+
 	memset(conn_param, 0, sizeof(*conn_param));
 	conn_param->responder_resources = 1;
 	conn_param->initiator_depth = 1;
 	conn_param->retry_count = 7;
 	conn_param->rnr_retry_count = 7;
-	conn_param->qp_num = cb->qp->qp_num;
+	conn_param->qp_num = qp_num;
 
 	conn_param->private_data = &cb->remote_buf_info; // server's reports it's RDMA buffer details
-	conn_param->private_data_len = sizeof(struct dcping_rdma_info);
+	conn_param->private_data_len = sizeof(cb->remote_buf_info);
 }
 
 static int dcping_setup_buffers(struct dcping_cb *cb)
@@ -175,6 +188,7 @@ static int dcping_setup_buffers(struct dcping_cb *cb)
 		cb->remote_buf_info.addr = htobe64((uint64_t) (unsigned long) cb->local_buf_addr);
 		cb->remote_buf_info.size = htobe32(cb->size);
 		cb->remote_buf_info.rkey = htobe32(cb->local_buf_mr->rkey);
+		cb->remote_buf_info.dctn = htobe32(cb->qp->qp_num);
 	}
 
 	DEBUG_LOG("allocated & registered buffers...\n");
@@ -388,21 +402,6 @@ static int dcping_setup_qp(struct dcping_cb *cb)
 	}
 	DEBUG_LOG("created cq %p\n", cb->cq);
 
-	ret = ibv_query_device_ex(cb->cm_id->verbs, NULL, &device_attr_ex);
-	if (ret) {
-		fprintf(stderr, "ibv_query_device_ex failed\n");
-		ret = errno;
-		goto err3;
-	}
-	if (!device_attr_ex.hca_core_clock) {
-		fprintf(stderr, "hca_core_clock = 0\n");
-		ret = errno;
-		goto err3;
-	}
-
-	cb->hw_clocks_kHz = device_attr_ex.hca_core_clock;
-	DEBUG_LOG("hw_clocks_kHz = %u\n", cb->hw_clocks_kHz);
-
 	if (cb->is_server) 
 	{
 		struct ibv_srq_init_attr srq_attr;
@@ -428,8 +427,22 @@ static int dcping_setup_qp(struct dcping_cb *cb)
 	if (ret) {
 		goto err5;
 	}
-
 	DEBUG_LOG("created qp %p (qpn=%d)\n", cb->qp, (cb->qp ? cb->qp->qp_num : (uint32_t)-1));
+
+	ret = ibv_query_device_ex(cb->cm_id->verbs, NULL, &device_attr_ex);
+	if (ret) {
+		fprintf(stderr, "ibv_query_device_ex failed\n");
+		ret = errno;
+		goto err3;
+	}
+	if (!device_attr_ex.hca_core_clock) {
+		fprintf(stderr, "hca_core_clock = 0\n");
+		ret = errno;
+		goto err3;
+	}
+	cb->hw_clocks_kHz = device_attr_ex.hca_core_clock;
+	DEBUG_LOG("hw_clocks_kHz = %u\n", cb->hw_clocks_kHz);
+
 	return 0;
 
 err5:
@@ -459,7 +472,7 @@ static int dcping_handle_cm_event(struct dcping_cb *cb, enum rdma_cm_event_type 
                 perror("rdma_get_cm_event");
                 exit(ret);
         }
-        DEBUG_LOG("got cm event: %s(%d) cm_id %p\n", rdma_event_str(event->event), event->event, event->id);
+        DEBUG_LOG("got cm event: %s(%d) status=%d, cm_id %p\n", rdma_event_str(event->event), event->event, event->status, event->id);
 
 	*cm_id = event->id;
 	*cm_event = event->event;
@@ -483,12 +496,12 @@ static int dcping_handle_cm_event(struct dcping_cb *cb, enum rdma_cm_event_type 
 				struct rdma_conn_param *conn_param = &event->param.conn;
 				struct dcping_rdma_info *remote_buf_info = (struct dcping_rdma_info *)conn_param->private_data;
 
-				cb->remote_qp_num = conn_param->qp_num;
 				cb->remote_buf_info.addr = be64toh(remote_buf_info->addr);
 				cb->remote_buf_info.size = be32toh(remote_buf_info->size);
 				cb->remote_buf_info.rkey = be32toh(remote_buf_info->rkey);
+				cb->remote_buf_info.dctn = be32toh(remote_buf_info->dctn); 
 
-				DEBUG_LOG("GOT dctn=%d, buf=%p, size=%d, rkey=%d\n", cb->remote_qp_num, cb->remote_buf_info.addr, cb->remote_buf_info.size, cb->remote_buf_info.rkey);
+				DEBUG_LOG("got server param's: dctn=%d, buf=%p, size=%d, rkey=%d\n", cb->remote_buf_info.dctn, cb->remote_buf_info.addr, cb->remote_buf_info.size, cb->remote_buf_info.rkey);
 			}
 			break;
 
@@ -531,7 +544,7 @@ static int dcping_bind_server(struct dcping_cb *cb)
 		exit(1);
 	}
 
-	DEBUG_LOG("rdma_bind_addr successful <%s, %d>\n", str, be16toh(cb->port));
+	DEBUG_LOG("rdma_bind_addr successful on address: <%s:%d>\n", str, be16toh(cb->port));
 
 	DEBUG_LOG("rdma_listen\n");
 	ret = rdma_listen(cb->cm_id, 3);
@@ -551,6 +564,7 @@ static void free_cb(struct dcping_cb *cb)
 static int dcping_run_server(struct dcping_cb *cb)
 {
 	int ret;
+        char str[INET_ADDRSTRLEN];
 
 	ret = dcping_bind_server(cb);
 	if (ret)
@@ -583,10 +597,17 @@ static int dcping_run_server(struct dcping_cb *cb)
 		switch (cm_event) {
 
 			case RDMA_CM_EVENT_CONNECT_REQUEST:
-				DEBUG_LOG("accepting client connection request (cm_id %p)\n", cm_id);
+				if (cb->sin.ss_family == AF_INET) {
+					inet_ntop(AF_INET, &(((struct sockaddr_in *)rdma_get_peer_addr(cm_id))->sin_addr), str, INET_ADDRSTRLEN);
+				}
+				else {
+					inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)rdma_get_peer_addr(cm_id))->sin6_addr), str, INET_ADDRSTRLEN);
+				}
+
+				DEBUG_LOG("accepting client connection request from <%s:%d> (cm_id %p)\n", str, be16toh(rdma_get_dst_port(cm_id)), cm_id);
 
 				struct rdma_conn_param conn_param;
-				dcping_init_conn_param(cb, &conn_param);
+				dcping_init_conn_param(cb, cm_id, &conn_param);
 				ret = rdma_accept(cm_id, &conn_param);
 				if (ret) {
 					perror("rdma_accept");
@@ -599,9 +620,9 @@ static int dcping_run_server(struct dcping_cb *cb)
 				break;
 
 			case RDMA_CM_EVENT_DISCONNECTED:
-				DEBUG_LOG("%s DISCONNECT EVENT (cm_id %p)\n", cb->is_server ? "server" : "client", cm_id);
 				rdma_disconnect(cm_id);
 				rdma_destroy_id(cm_id);
+				if (cb->is_server) printf("client connection disconnected (cm_id %p)\n", cm_id);
 				break;
 
 			default:
@@ -628,13 +649,13 @@ static int dcping_client_dc_send_wr(struct dcping_cb *cb, uint64_t wr_id)
 	cb->qpex->wr_id = wr_id;
 	cb->qpex->wr_flags = IBV_SEND_SIGNALED;
 	ibv_wr_rdma_write(cb->qpex, cb->remote_buf_info.rkey, cb->remote_buf_info.addr);
-	mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->remote_qp_num, DC_KEY);
+	mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->remote_buf_info.dctn, DC_KEY);
 	ibv_wr_set_sge(cb->qpex, cb->local_buf_mr->lkey,
 			(uintptr_t)cb->local_buf_addr, 1);
 
 	/* 2nd SIZE x RDMA Write, this will create cqe->ts_end */
         ibv_wr_rdma_write(cb->qpex, cb->remote_buf_info.rkey, cb->remote_buf_info.addr);
-        mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->remote_qp_num, DC_KEY);
+        mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->remote_buf_info.dctn, DC_KEY);
         ibv_wr_set_sge(cb->qpex, cb->local_buf_mr->lkey,
                         (uintptr_t)cb->local_buf_addr,
                         (uint32_t)cb->size);
@@ -750,7 +771,7 @@ static int dcping_test_client(struct dcping_cb *cb)
 	uint64_t rtt_nsec_max = 0;
 	uint64_t rtt_nsec_total = 0;
 
-	printf("connected to server, starting RTT test\n");
+	printf("connected to server, starting DC RTT test\n");
 
 	for (ping = 0; !cb->count || ping < cb->count; ping++) {
 		/* initiate RDMA Write x2 ops to create tiemstamp CQE's */
@@ -776,7 +797,7 @@ static int dcping_test_client(struct dcping_cb *cb)
 		if (rtt_nsec_min > rtt_nsec) rtt_nsec_min = rtt_nsec;
 		if (rtt_nsec_max < rtt_nsec) rtt_nsec_max = rtt_nsec;
 
-		usleep(100 * 1000);
+		usleep(cb->delay_usec);
 	}
 
 	printf("\r[total = %d] rtt = %d.%3.3d / %d.%3.3d / %d.%3.3d usec <min/avg/max>\n", ping, 
@@ -798,7 +819,7 @@ static int dcping_connect_client(struct dcping_cb *cb)
 	struct rdma_conn_param conn_param;
 
 	DEBUG_LOG("rdma_connecting...\n");
-	dcping_init_conn_param(cb, &conn_param);
+	dcping_init_conn_param(cb, cb->cm_id, &conn_param);
 	ret = rdma_connect(cb->cm_id, &conn_param);
 	if (ret) {
 		perror("rdma_connect");
@@ -842,13 +863,19 @@ static int dcping_connect_client(struct dcping_cb *cb)
 static int dcping_bind_client(struct dcping_cb *cb)
 {
 	int ret;
+	uint16_t port;
+	char str[INET_ADDRSTRLEN];
 	struct rdma_cm_id *cm_id;
 	enum rdma_cm_event_type cm_event;       
 
-	if (cb->sin.ss_family == AF_INET)
+	if (cb->sin.ss_family == AF_INET) {
 		((struct sockaddr_in *) &cb->sin)->sin_port = cb->port;
-	else
+		inet_ntop(AF_INET, &(((struct sockaddr_in *)&cb->sin)->sin_addr), str, INET_ADDRSTRLEN);
+	}
+	else {
 		((struct sockaddr_in6 *) &cb->sin)->sin6_port = cb->port;
+		inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)&cb->sin)->sin6_addr), str, INET_ADDRSTRLEN);
+	}
 
 	if (cb->ssource.ss_family) 
 		ret = rdma_resolve_addr(cb->cm_id, (struct sockaddr *) &cb->ssource,
@@ -876,7 +903,7 @@ static int dcping_bind_client(struct dcping_cb *cb)
 		return -1;
 	}
 
-	DEBUG_LOG("rdma_resolve_addr/rdma_resolve_route successful\n");
+	DEBUG_LOG("rdma_resolve_addr/rdma_resolve_route successful to server: <%s:%d>\n", str, be16toh(rdma_get_src_port(cb->cm_id)));
 	return 0;
 }
 
@@ -945,21 +972,25 @@ static int get_addr(char *dst, struct sockaddr *addr)
 	return ret;
 }
 
-static void usage(const char *name)
+static void usage(const char *name, int op)
 {
-	printf("%s -s [-a addr] [-vVd] [-S size] [-C count] [-p port]\n", 
+	if (op) {
+		printf("%s: op '%c' not avilable\n", 
+			basename(name), op);
+	}
+	printf("%s -s -a addr [-d] [-S size] [-C count] [-p port]\n", 
 	       basename(name));
-	printf("%s -c -a addr [-vVd] [-S size] [-C count] [-I addr] [-p port]\n", 
+	printf("%s -c -a addr [-d] [-S size] [-C count] [-D delay] [-I addr] [-p port]\n", 
 	       basename(name));
 	printf("\t-c\t\tclient side\n");
-	printf("\t-I\t\tSource address to bind to for client.\n");
 	printf("\t-s\t\tserver side. To bind to any address with IPv6 use -a ::0\n");
-	printf("\t-v\t\tdisplay ping data to stdout\n");
-	printf("\t-d\t\tdebug printfs\n");
-	printf("\t-S size \tping data size\n");
-	printf("\t-C count\tping count times\n");
 	printf("\t-a addr\t\taddress\n");
-	printf("\t-p port\t\tport\n");
+	printf("\t-p port\t\tserver port\n");
+	printf("\t-I\t\tSource address to bind to for client.\n");
+	printf("\t-S size \tping data size (default: 64B)\n");
+	printf("\t-C count\tping count times (default: 1)\n");
+	printf("\t-D delay\tinter-rtt delay [milli-sec] (default: 1 sec)\n");
+	printf("\t-d\t\tdebug printfs\n");
 }
 
 int main(int argc, char *argv[])
@@ -980,7 +1011,7 @@ int main(int argc, char *argv[])
 	cb->port = htobe16(7174);
 
 	opterr = 0;
-	while ((op = getopt(argc, argv, "a:I:p:C:S:t:scvd")) != -1) {
+	while ((op = getopt(argc, argv, "a:I:p:C:S:D:t:scvd")) != -1) {
 		switch (op) {
 		case 'a':
 			ret = get_addr(optarg, (struct sockaddr *) &cb->sin);
@@ -1020,15 +1051,15 @@ int main(int argc, char *argv[])
 			} else
 				DEBUG_LOG("count %d\n", (int) cb->count);
 			break;
-		case 'v':
-			debug++;
-			DEBUG_LOG("verbose\n");
+		case 'D':
+			cb->delay_usec = atoi(optarg) * 1000;
+			DEBUG_LOG("delay %d [msec]\n", cb->delay_usec / 1000);
 			break;
 		case 'd':
 			debug++;
 			break;
 		default:
-			usage("rping");
+			usage("rping", op);
 			ret = EINVAL;
 			goto out;
 		}
@@ -1037,7 +1068,7 @@ int main(int argc, char *argv[])
 		goto out;
 
 	if (cb->is_server == -1) {
-		usage("dcping");
+		usage("dcping", 0);
 		ret = EINVAL;
 		goto out;
 	}
