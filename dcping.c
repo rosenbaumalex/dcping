@@ -1,6 +1,5 @@
 /*
- * Copyright (c) 2005 Ammasso, Inc. All rights reserved.
- * Copyright (c) 2006 Open Grid Computing, Inc. All rights reserved.
+ * Copyright (c) 2019 Mellanox Technologies, Inc.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -37,6 +36,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <limits.h>
+#include <unistd.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -44,6 +44,7 @@
 #include <arpa/inet.h>
 #include <rdma/rdma_cma.h>
 #include <infiniband/mlx5dv.h>
+#include "ibv_helper.h"
 
 static int debug = 0;
 static int debug_fast_path = 0;
@@ -107,6 +108,10 @@ struct dcping_cb {
         struct ibv_qp_ex *qpex;		/* client only */
         struct mlx5dv_qp_ex *mqpex;	/* client only */
 	struct ibv_ah *ah;		/* client only */
+	enum ibv_mtu mtu;
+	uint8_t is_global;
+	uint8_t sgid_index;
+
 
 	/* CM stuff */
 	struct rdma_event_channel *cm_channel;
@@ -283,7 +288,7 @@ static int dcping_modify_qp(struct dcping_cb *cb)
 		struct ibv_qp_attr attr = {
 			.qp_state        = IBV_QPS_INIT,
 			.pkey_index      = 0,
-			.port_num        = 1
+			.port_num        = cb->cm_id->port_num,
 		};
 
 		if (cb->is_server) {
@@ -305,14 +310,17 @@ static int dcping_modify_qp(struct dcping_cb *cb)
 
 		struct ibv_qp_attr attr = {
 			.qp_state               = IBV_QPS_RTR,
-			.path_mtu               = IBV_MTU_1024,
+			.path_mtu               = cb->mtu,
 			.min_rnr_timer          = 0x10,
 			.rq_psn                 = 0,
 			.ah_attr                = {
-				.is_global      = 1,
+				.is_global      = cb->is_global,
 				.sl             = 0,
 				.src_path_bits  = 0,
-				.port_num       = 1,
+				.port_num       = cb->cm_id->port_num,
+				.grh.hop_limit  = 1,
+				.grh.sgid_index = cb->sgid_index,
+
 			}
 		};
 
@@ -521,6 +529,7 @@ static int dcping_bind_server(struct dcping_cb *cb)
 {
 	int ret;
 	char str[INET_ADDRSTRLEN];
+	struct ibv_port_attr port_attr;
 
 	if (cb->sin.ss_family == AF_INET) {
 		((struct sockaddr_in *) &cb->sin)->sin_port = cb->port;
@@ -539,6 +548,16 @@ static int dcping_bind_server(struct dcping_cb *cb)
 	if (cb->cm_id->verbs == NULL) {
 		DEBUG_LOG("Failed to bind to an RDMA device, exiting... <%s, %d>\n", str, be16toh(cb->port));
 		exit(1);
+	}
+
+	if (ibv_query_port(cb->cm_id->verbs, cb->cm_id->port_num, &port_attr)) {
+                perror("ibv_query_port");
+		exit(1);
+        }
+	cb->mtu = port_attr.active_mtu;
+	if (port_attr.link_layer == IBV_LINK_LAYER_ETHERNET) {
+		cb->is_global = 1;
+		cb->sgid_index = ibv_find_sgid_type(cb->cm_id->verbs, cb->cm_id->port_num, IBV_GID_TYPE_ROCE_V2, cb->sin.ss_family);
 	}
 
 	DEBUG_LOG("rdma_bind_addr successful on address: <%s:%d>\n", str, be16toh(cb->port));
@@ -863,6 +882,7 @@ static int dcping_bind_client(struct dcping_cb *cb)
 	int ret;
 	uint16_t port;
 	char str[INET_ADDRSTRLEN];
+	struct ibv_port_attr port_attr;
 	struct rdma_cm_id *cm_id;
 	enum rdma_cm_event_type cm_event;       
 
@@ -900,6 +920,16 @@ static int dcping_bind_client(struct dcping_cb *cb)
 	if (cm_event != RDMA_CM_EVENT_ROUTE_RESOLVED) {
 		return -1;
 	}
+
+        if (ibv_query_port(cb->cm_id->verbs, cb->cm_id->port_num, &port_attr)) {
+                perror("ibv_query_port");
+                exit(1);
+        }
+        cb->mtu = port_attr.active_mtu;
+        if (port_attr.link_layer == IBV_LINK_LAYER_ETHERNET) {
+		cb->is_global = 1;
+                cb->sgid_index = ibv_find_sgid_type(cb->cm_id->verbs, cb->cm_id->port_num, IBV_GID_TYPE_ROCE_V2, cb->sin.ss_family);
+        }
 
 	DEBUG_LOG("rdma_resolve_addr/rdma_resolve_route successful to server: <%s:%d>\n", str, be16toh(rdma_get_src_port(cb->cm_id)));
 	return 0;
