@@ -175,9 +175,8 @@ static int dcping_setup_buffers(struct dcping_cb *cb)
 	}
 
 	cb->local_buf_mr = ibv_reg_mr(cb->pd, cb->local_buf_addr, cb->size,
-				 IBV_ACCESS_LOCAL_WRITE |
-				 IBV_ACCESS_REMOTE_READ |
-				 IBV_ACCESS_REMOTE_WRITE);
+				IBV_ACCESS_LOCAL_WRITE |
+				IBV_ACCESS_REMOTE_WRITE);
 	if (!cb->local_buf_mr) {
 		fprintf(stderr, "local_buf_addr reg_mr failed\n");
 		ret = errno;
@@ -242,7 +241,7 @@ static int dcping_create_qp(struct dcping_cb *cb)
 		attr_ex.cap.max_send_sge = 1;
 
 		attr_ex.comp_mask |= IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
-		attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE | IBV_QP_EX_WITH_RDMA_READ;
+		attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE;
 
 		attr_dv.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_QP_CREATE_FLAGS;
 		attr_dv.create_flags |= MLX5DV_QP_CREATE_DISABLE_SCATTER_TO_CQE; /*driver doesnt support scatter2cqe data-path on DCI yet*/
@@ -289,9 +288,7 @@ static int dcping_modify_qp(struct dcping_cb *cb)
 
 		if (cb->is_server) {
 			attr_mask |= IBV_QP_ACCESS_FLAGS;
-			attr.qp_access_flags = IBV_ACCESS_REMOTE_WRITE | 
-					       IBV_ACCESS_REMOTE_READ | 
-					       IBV_ACCESS_REMOTE_ATOMIC;
+			attr.qp_access_flags = IBV_ACCESS_REMOTE_WRITE;
 		}
 
 
