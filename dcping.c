@@ -94,10 +94,10 @@ struct dcping_rdma_info {
  * Control block struct.
  */
 struct dcping_cb {
-	int count;			/* ping count */
-	int size;			/* ping data size */
-	int delay_usec;
 	int is_server;
+	uint32_t count;			/* ping count */
+	uint32_t size;			/* ping data size */
+	uint32_t delay_usec;
 
 	/* verbs stuff */
 	struct ibv_comp_channel *channel;
@@ -320,6 +320,7 @@ static int dcping_modify_qp(struct dcping_cb *cb)
 				.port_num       = cb->cm_id->port_num,
 				.grh.hop_limit  = 1,
 				.grh.sgid_index = cb->sgid_index,
+				.grh.traffic_class = 0,
 
 			}
 		};
@@ -446,7 +447,7 @@ static int dcping_setup_qp(struct dcping_cb *cb)
 		goto err3;
 	}
 	cb->hw_clocks_kHz = device_attr_ex.hca_core_clock;
-	DEBUG_LOG("hw_clocks_kHz = %u\n", cb->hw_clocks_kHz);
+	DEBUG_LOG("hw_clocks_kHz = %ld\n", cb->hw_clocks_kHz);
 
 	return 0;
 
@@ -506,7 +507,7 @@ static int dcping_handle_cm_event(struct dcping_cb *cb, enum rdma_cm_event_type 
 				cb->remote_buf_info.rkey = be32toh(remote_buf_info->rkey);
 				cb->remote_buf_info.dctn = be32toh(remote_buf_info->dctn); 
 
-				DEBUG_LOG("got server param's: dctn=%d, buf=%p, size=%d, rkey=%d\n", cb->remote_buf_info.dctn, cb->remote_buf_info.addr, cb->remote_buf_info.size, cb->remote_buf_info.rkey);
+				DEBUG_LOG("got server param's: dctn=%d, buf=%llu, size=%d, rkey=%d\n", cb->remote_buf_info.dctn, cb->remote_buf_info.addr, cb->remote_buf_info.size, cb->remote_buf_info.rkey);
 			}
 			break;
 
@@ -721,9 +722,9 @@ static int dcping_client_process_cqe(struct dcping_cb *cb, uint64_t wr_id, uint6
 	}
 
 	if (cb->cq->wr_id != wr_id) {
-		fprintf(stderr, "CQ failed wr_id compare '%s' (%d) for cqe->wr_id(%d) vs wr_id(%d)\n",
+		fprintf(stderr, "CQ failed wr_id compare '%s' (%d) for cqe->wr_id(%ld) vs wr_id(%ld)\n",
 				ibv_wc_status_str(cb->cq->status), cb->cq->status,
-				(int)cb->cq->wr_id, wr_id);
+				cb->cq->wr_id, wr_id);
 		return -1;
 	}
 
@@ -760,7 +761,7 @@ static int dcping_client_get_cqe_tiemstmp(struct dcping_cb *cb, uint64_t wr_id, 
 		ret = dcping_client_process_cqe(cb, wr_id, &ts_hw);
 		ibv_end_poll(cb->cq);
 
-		DEBUG_LOG_FAST_PATH("processing cqe (step %d) ts_hw = %u\n", step, ts_hw);
+		DEBUG_LOG_FAST_PATH("processing cqe (step %d) ts_hw = %lu\n", step, ts_hw);
 
 		if (ret)
 			return ret;
@@ -779,7 +780,8 @@ static int dcping_client_get_cqe_tiemstmp(struct dcping_cb *cb, uint64_t wr_id, 
 
 static int dcping_test_client(struct dcping_cb *cb)
 {
-	int ping, ret = 0;
+	int ret = 0;
+	uint32_t ping;
 	uint64_t ts_hw_start, ts_hw_end;
 	uint64_t rtt_nsec, rtt_hw;
 
@@ -808,7 +810,7 @@ static int dcping_test_client(struct dcping_cb *cb)
 		/* clac RTT */
 		rtt_hw = ts_hw_end - ts_hw_start;
 		rtt_nsec = rtt_hw * USEC_PER_SEC / cb->hw_clocks_kHz;
-		printf("\r[iter =%4d] rtt = %d.%3.3d usec", ping, rtt_nsec/1000, rtt_nsec%1000); fflush(stdout);
+		printf("\r[iter =%4d] rtt = %ld.%3.3ld usec", ping, rtt_nsec/1000, rtt_nsec%1000); fflush(stdout);
 
 		rtt_nsec_total += rtt_nsec;
 		if (rtt_nsec_min > rtt_nsec) rtt_nsec_min = rtt_nsec;
@@ -817,7 +819,7 @@ static int dcping_test_client(struct dcping_cb *cb)
 		usleep(cb->delay_usec);
 	}
 
-	printf("\r[total = %d] rtt = %d.%3.3d / %d.%3.3d / %d.%3.3d usec <min/avg/max>\n", ping, 
+	printf("\r[total = %d] rtt = %ld.%3.3ld / %ld.%3.3ld / %ld.%3.3ld usec <min/avg/max>\n", ping, 
 		(rtt_nsec_min)/1000, (rtt_nsec_min)%1000, 
 		(rtt_nsec_total/ping)/1000, (rtt_nsec_total/ping)%1000,
 		(rtt_nsec_max)/1000, (rtt_nsec_max)%1000);
@@ -880,7 +882,6 @@ static int dcping_connect_client(struct dcping_cb *cb)
 static int dcping_bind_client(struct dcping_cb *cb)
 {
 	int ret;
-	uint16_t port;
 	char str[INET_ADDRSTRLEN];
 	struct ibv_port_attr port_attr;
 	struct rdma_cm_id *cm_id;
@@ -1072,12 +1073,7 @@ int main(int argc, char *argv[])
 			break;
 		case 'C':
 			cb->count = atoi(optarg);
-			if (cb->count < 0) {
-				fprintf(stderr, "Invalid count %d\n",
-					cb->count);
-				ret = EINVAL;
-			} else
-				DEBUG_LOG("count %d\n", (int) cb->count);
+			DEBUG_LOG("count %d\n", (int) cb->count);
 			break;
 		case 'D':
 			cb->delay_usec = atoi(optarg) * 1000;
@@ -1125,6 +1121,6 @@ int main(int argc, char *argv[])
 out2:
 	rdma_destroy_event_channel(cb->cm_channel);
 out:
-	free(cb);
+	free_cb(cb);
 	return ret;
 }
