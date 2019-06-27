@@ -252,8 +252,6 @@ static int dcping_create_qp(struct dcping_cb *cb)
 		attr_dv.create_flags |= MLX5DV_QP_CREATE_DISABLE_SCATTER_TO_CQE; /*driver doesnt support scatter2cqe data-path on DCI yet*/
 
 		cb->qp = mlx5dv_create_qp(cb->cm_id->verbs, &attr_ex, &attr_dv);
-		cb->qpex = ibv_qp_to_qp_ex(cb->qp);
-                cb->mqpex = mlx5dv_qp_ex_from_ibv_qp_ex(cb->qpex);
 	}
 
 	if (!cb->qp) {
@@ -262,10 +260,12 @@ static int dcping_create_qp(struct dcping_cb *cb)
 		return ret;
 	}
 	if (!cb->is_server) {
+		cb->qpex = ibv_qp_to_qp_ex(cb->qp);
 		if (!cb->qpex) {
 			perror("ibv_qp_to_qp_ex(DC)");
 			ret = errno;
 		}
+		cb->mqpex = mlx5dv_qp_ex_from_ibv_qp_ex(cb->qpex);
 		if (!cb->mqpex) {
 			perror("mlx5dv_qp_ex_from_ibv_qp_ex(DC)");
 			ret = errno;
