@@ -51,6 +51,8 @@ static int debug_fast_path = 0;
 #define DEBUG_LOG if (debug) printf
 #define DEBUG_LOG_FAST_PATH if (debug_fast_path) printf
 
+size_t sge_count = 1;
+
 /*
  * dcping "RTT" loop:
  * 	server listens for incoming connection requests
@@ -111,6 +113,9 @@ struct dcping_cb {
 	enum ibv_mtu mtu;
 	uint8_t is_global;
 	uint8_t sgid_index;
+	uint32_t max_wr;
+	uint32_t max_sge;
+
 
 
 	/* CM stuff */
@@ -243,7 +248,7 @@ static int dcping_create_qp(struct dcping_cb *cb)
 		attr_dv.dc_init_attr.dc_type = MLX5DV_DCTYPE_DCI;
 
 		attr_ex.cap.max_send_wr = PING_SQ_DEPTH;
-		attr_ex.cap.max_send_sge = 1;
+		attr_ex.cap.max_send_sge = sge_count;
 
 		attr_ex.comp_mask |= IBV_QP_INIT_ATTR_SEND_OPS_FLAGS;
 		attr_ex.send_ops_flags = IBV_QP_EX_WITH_RDMA_WRITE;
@@ -270,7 +275,11 @@ static int dcping_create_qp(struct dcping_cb *cb)
 			perror("mlx5dv_qp_ex_from_ibv_qp_ex(DC)");
 			ret = errno;
 		}
-		return ret;
+		cb->max_wr = attr_ex.cap.max_send_wr;
+		cb->max_sge = attr_ex.cap.max_send_sge;
+	} else {
+		cb->max_wr = attr_ex.cap.max_recv_wr;
+		cb->max_sge = attr_ex.cap.max_recv_sge;
 	}
 
 	return ret;
@@ -406,7 +415,7 @@ static int dcping_setup_qp(struct dcping_cb *cb)
 		ret = errno;
 		goto err2;
 	}
-	DEBUG_LOG("created cq %p\n", cb->cq);
+	DEBUG_LOG("created cq %p (max_cqe=%d)\n", cb->cq, cq_attr_ex.cqe);
 
 	if (cb->is_server) 
 	{
@@ -421,7 +430,7 @@ static int dcping_setup_qp(struct dcping_cb *cb)
 			goto err3;
 		}
 
-		DEBUG_LOG("created srq %p\n", cb->srq);
+		DEBUG_LOG("created srq %p (max_wr=%d, max_sge=%d)\n", cb->srq, srq_attr.attr.max_wr, srq_attr.attr.max_sge);
 	}
 
 	ret = dcping_create_qp(cb);
@@ -433,7 +442,7 @@ static int dcping_setup_qp(struct dcping_cb *cb)
 	if (ret) {
 		goto err5;
 	}
-	DEBUG_LOG("created qp %p (qpn=%d)\n", cb->qp, (cb->qp ? cb->qp->qp_num : (uint32_t)-1));
+	DEBUG_LOG("created qp %p (qpn=%d, max_wr=%d, max_sge=%d)\n", cb->qp, (cb->qp ? cb->qp->qp_num : (uint32_t)-1), cb->max_wr, cb->max_sge);
 
 	ret = ibv_query_device_ex(cb->cm_id->verbs, NULL, &device_attr_ex);
 	if (ret) {
@@ -661,6 +670,9 @@ err1:
 
 static int dcping_client_dc_send_wr(struct dcping_cb *cb, uint64_t wr_id)
 {
+	int i = 0;
+	struct ibv_sge sge_list[1000];
+
 	/* 1st small RDMA Write for DCI connect, this will create cqe->ts_start */
 	ibv_wr_start(cb->qpex);
 	cb->qpex->wr_id = wr_id;
@@ -673,9 +685,16 @@ static int dcping_client_dc_send_wr(struct dcping_cb *cb, uint64_t wr_id)
 	/* 2nd SIZE x RDMA Write, this will create cqe->ts_end */
         ibv_wr_rdma_write(cb->qpex, cb->remote_buf_info.rkey, cb->remote_buf_info.addr);
         mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->remote_buf_info.dctn, DC_KEY);
-        ibv_wr_set_sge(cb->qpex, cb->local_buf_mr->lkey,
+/*        ibv_wr_set_sge(cb->qpex, cb->local_buf_mr->lkey,
                         (uintptr_t)cb->local_buf_addr,
                         (uint32_t)cb->size);
+*/
+	for (i=0; i<sge_count; i++) {
+		sge_list[i].addr =  (uintptr_t)cb->local_buf_addr;
+		sge_list[i].length = (uint32_t)cb->size/sge_count;
+		sge_list[i].lkey = cb->local_buf_mr->lkey;
+	}
+	ibv_wr_set_sge_list(cb->qpex, sge_count, sge_list);
 
 	/* ring DB */
 	return ibv_wr_complete(cb->qpex);
