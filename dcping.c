@@ -88,6 +88,9 @@ struct dcping_rdma_info {
 #define PING_MSG_FMT           "dcping-%d: "
 #define PING_MIN_BUFSIZE       sizeof(stringify(INT_MAX)) + sizeof(PING_MSG_FMT)
 
+#define MAX(a,b) ((a)>(b)?(a):(b))
+#define MAX_INET_ADDRSTRLEN    MAX(INET_ADDRSTRLEN, INET6_ADDRSTRLEN)
+
 #define USEC_PER_SEC    1000000L
 
 /*
@@ -529,16 +532,16 @@ static int dcping_handle_cm_event(struct dcping_cb *cb, enum rdma_cm_event_type 
 static int dcping_bind_server(struct dcping_cb *cb)
 {
 	int ret;
-	char str[INET_ADDRSTRLEN];
+	char str[MAX_INET_ADDRSTRLEN];
 	struct ibv_port_attr port_attr;
 
 	if (cb->sin.ss_family == AF_INET) {
 		((struct sockaddr_in *) &cb->sin)->sin_port = cb->port;
-		inet_ntop(AF_INET, &(((struct sockaddr_in *)&cb->sin)->sin_addr), str, INET_ADDRSTRLEN);
+		inet_ntop(AF_INET, &(((struct sockaddr_in *)&cb->sin)->sin_addr), str, sizeof(str));
 	}
 	else {
 		((struct sockaddr_in6 *) &cb->sin)->sin6_port = cb->port;
-		inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)&cb->sin)->sin6_addr), str, INET_ADDRSTRLEN);
+		inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)&cb->sin)->sin6_addr), str, sizeof(str));
 	}
 
 	ret = rdma_bind_addr(cb->cm_id, (struct sockaddr *) &cb->sin);
@@ -581,7 +584,7 @@ static void free_cb(struct dcping_cb *cb)
 static int dcping_run_server(struct dcping_cb *cb)
 {
 	int ret;
-        char str[INET_ADDRSTRLEN];
+        char str[MAX_INET_ADDRSTRLEN];
 
 	ret = dcping_bind_server(cb);
 	if (ret)
@@ -615,10 +618,10 @@ static int dcping_run_server(struct dcping_cb *cb)
 
 			case RDMA_CM_EVENT_CONNECT_REQUEST:
 				if (cb->sin.ss_family == AF_INET) {
-					inet_ntop(AF_INET, &(((struct sockaddr_in *)rdma_get_peer_addr(cm_id))->sin_addr), str, INET_ADDRSTRLEN);
+					inet_ntop(AF_INET, &(((struct sockaddr_in *)rdma_get_peer_addr(cm_id))->sin_addr), str, sizeof(str));
 				}
 				else {
-					inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)rdma_get_peer_addr(cm_id))->sin6_addr), str, INET_ADDRSTRLEN);
+					inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)rdma_get_peer_addr(cm_id))->sin6_addr), str, sizeof(str));
 				}
 
 				DEBUG_LOG("accepting client connection request from <%s:%d> (cm_id %p)\n", str, be16toh(rdma_get_dst_port(cm_id)), cm_id);
@@ -882,18 +885,18 @@ static int dcping_connect_client(struct dcping_cb *cb)
 static int dcping_bind_client(struct dcping_cb *cb)
 {
 	int ret;
-	char str[INET_ADDRSTRLEN];
+	char str[MAX_INET_ADDRSTRLEN];
 	struct ibv_port_attr port_attr;
 	struct rdma_cm_id *cm_id;
 	enum rdma_cm_event_type cm_event;       
 
 	if (cb->sin.ss_family == AF_INET) {
 		((struct sockaddr_in *) &cb->sin)->sin_port = cb->port;
-		inet_ntop(AF_INET, &(((struct sockaddr_in *)&cb->sin)->sin_addr), str, INET_ADDRSTRLEN);
+		inet_ntop(AF_INET, &(((struct sockaddr_in *)&cb->sin)->sin_addr), str, sizeof(str));
 	}
 	else {
 		((struct sockaddr_in6 *) &cb->sin)->sin6_port = cb->port;
-		inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)&cb->sin)->sin6_addr), str, INET_ADDRSTRLEN);
+		inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)&cb->sin)->sin6_addr), str, sizeof(str));
 	}
 
 	if (cb->ssource.ss_family) 
@@ -996,7 +999,7 @@ static int get_addr(char *dst, struct sockaddr *addr)
 		memcpy(addr, res->ai_addr, sizeof(struct sockaddr_in6));
 	else
 		ret = -1;
-	
+
 	freeaddrinfo(res);
 	return ret;
 }

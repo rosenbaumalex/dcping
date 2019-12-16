@@ -144,6 +144,14 @@ static int ibv_query_gid_type(struct ibv_context *context, uint8_t port_num,
         return 0;
 }
 
+void ibv_find_gid_family(union ibv_gid *gid, int *gid_family)
+{
+        if (gid->raw[0] == 0 && gid->raw[1] == 0)
+                *gid_family = AF_INET;
+        else 
+                *gid_family = AF_INET6;
+}
+
 int ibv_find_sgid_type(struct ibv_context *context, uint8_t port_num,
 		enum ibv_gid_type gid_type, int gid_family)
 {
@@ -153,6 +161,7 @@ int ibv_find_sgid_type(struct ibv_context *context, uint8_t port_num,
         int idx = 0;
 
         do {
+
                 if (ibv_query_gid(context, port_num, idx, &sgid)) {
                         errno = EFAULT;
                         return -1;
@@ -161,9 +170,8 @@ int ibv_find_sgid_type(struct ibv_context *context, uint8_t port_num,
                         errno = EFAULT;
                         return -1;
                 }
-                if (sgid.raw[0] == 0 && sgid.raw[1] == 0) {
-                        sgid_family = AF_INET;
-                }
+
+                ibv_find_gid_family(&sgid, &sgid_family);
 
                 if (gid_type == sgid_type && gid_family == sgid_family) {
                         return idx;
