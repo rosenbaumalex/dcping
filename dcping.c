@@ -674,6 +674,7 @@ static int dcping_client_dc_send_wr(struct dcping_cb *cb, uint64_t wr_id)
 			(uintptr_t)cb->local_buf_addr, 1);
 
 	/* 2nd SIZE x RDMA Write, this will create cqe->ts_end */
+	cb->qpex->wr_flags = IBV_SEND_SIGNALED | IBV_SEND_FENCE;
         ibv_wr_rdma_write(cb->qpex, cb->remote_buf_info.rkey, cb->remote_buf_info.addr);
         mlx5dv_wr_set_dc_addr(cb->mqpex, cb->ah, cb->remote_buf_info.dctn, DC_KEY);
         ibv_wr_set_sge(cb->qpex, cb->local_buf_mr->lkey,
