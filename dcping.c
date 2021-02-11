@@ -44,7 +44,7 @@
 #include <arpa/inet.h>
 #include <rdma/rdma_cma.h>
 #include <infiniband/mlx5dv.h>
-#include "ibv_helper.h"
+#include "my_ibv_helper.h"
 
 static int debug = 0;
 static int debug_fast_path = 0;
@@ -561,7 +561,7 @@ static int dcping_bind_server(struct dcping_cb *cb)
 	cb->mtu = port_attr.active_mtu;
 	if (port_attr.link_layer == IBV_LINK_LAYER_ETHERNET) {
 		cb->is_global = 1;
-		cb->sgid_index = ibv_find_sgid_type(cb->cm_id->verbs, cb->cm_id->port_num, IBV_GID_TYPE_ROCE_V2, cb->sin.ss_family);
+		cb->sgid_index = my_ibv_find_sgid_type(cb->cm_id->verbs, cb->cm_id->port_num, MY_IBV_GID_TYPE_ROCE_V2, cb->sin.ss_family);
 	}
 
 	DEBUG_LOG("rdma_bind_addr successful on address: <%s:%d>\n", str, be16toh(cb->port));
@@ -852,30 +852,26 @@ static int dcping_connect_client(struct dcping_cb *cb)
 	ret = dcping_handle_cm_event(cb, &cm_event, &cm_id);
 	if (ret || cm_event != RDMA_CM_EVENT_CONNECT_RESPONSE) {
 		perror("rdma_connect wrong responce");
-		ret = errno;
-		return ret;
+		return -1;
 	}
 
 	qp_attr.qp_state = IBV_QPS_RTR;
 	ret = rdma_init_qp_attr(cb->cm_id, &qp_attr, &qp_attr_mask);
 	if (ret) {
 		perror("rdma_init_qp_attr");
-		ret = errno;
 		return ret;
 	}
 
 	cb->ah = ibv_create_ah(cb->pd, &qp_attr.ah_attr);
 	if (!cb->ah) {
 		perror("ibv_create_ah");
-		ret = errno;
-		return ret;
+		return -1;
 	}
 	DEBUG_LOG("created ah (%p)\n", cb->ah);
 
 	ret = rdma_establish(cb->cm_id);
 	if (ret) {
 		perror("rdma_establish");
-		ret = errno;
 		return ret;
 	}
 
@@ -933,7 +929,7 @@ static int dcping_bind_client(struct dcping_cb *cb)
         cb->mtu = port_attr.active_mtu;
         if (port_attr.link_layer == IBV_LINK_LAYER_ETHERNET) {
 		cb->is_global = 1;
-                cb->sgid_index = ibv_find_sgid_type(cb->cm_id->verbs, cb->cm_id->port_num, IBV_GID_TYPE_ROCE_V2, cb->sin.ss_family);
+                cb->sgid_index = my_ibv_find_sgid_type(cb->cm_id->verbs, cb->cm_id->port_num, MY_IBV_GID_TYPE_ROCE_V2, cb->sin.ss_family);
         }
 
 	DEBUG_LOG("rdma_resolve_addr/rdma_resolve_route successful to server: <%s:%d>\n", str, be16toh(rdma_get_src_port(cb->cm_id)));

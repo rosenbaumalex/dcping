@@ -36,13 +36,13 @@
 #include <sys/types.h>
 #include <dirent.h>
 
-enum ibv_gid_type {
-        IBV_GID_TYPE_IB_ROCE_V1,
-        IBV_GID_TYPE_ROCE_V2,
+enum my_ibv_gid_type {
+        MY_IBV_GID_TYPE_IB_ROCE_V1,
+        MY_IBV_GID_TYPE_ROCE_V2,
 };
 
-static int ibv_read_sysfs_file(const char *dir, const char *file,
-                        char *buf, size_t size)
+static int my_ibv_read_sysfs_file(const char *dir, const char *file,
+                                  char *buf, size_t size)
 {
         char *path;
         int fd;
@@ -85,8 +85,8 @@ static int ibv_read_sysfs_file(const char *dir, const char *file,
  */
 #define V1_TYPE "IB/RoCE v1"
 #define V2_TYPE "RoCE v2"
-static int ibv_query_gid_type(struct ibv_context *context, uint8_t port_num,
-                unsigned int index, enum ibv_gid_type *type)
+static int my_ibv_query_gid_type(struct ibv_context *context, uint8_t port_num,
+                                 unsigned int index, enum my_ibv_gid_type *type)
 {
         char name[32];
         char buff[11];
@@ -98,8 +98,8 @@ static int ibv_query_gid_type(struct ibv_context *context, uint8_t port_num,
 	 * ibv_read_sysfs_file.
 	 */
 	errno = 0;
-	if (ibv_read_sysfs_file(context->device->ibdev_path, name, buff,
-				sizeof(buff)) <= 0) {
+	if (my_ibv_read_sysfs_file(context->device->ibdev_path, name, buff,
+				   sizeof(buff)) <= 0) {
 		char *dir_path;
 		DIR *dir;
 
@@ -107,7 +107,7 @@ static int ibv_query_gid_type(struct ibv_context *context, uint8_t port_num,
 			/* In IB, this file doesn't exist and the kernel sets
 			 * errno to -EINVAL.
 			 */
-			*type = IBV_GID_TYPE_IB_ROCE_V1;
+			*type = MY_IBV_GID_TYPE_IB_ROCE_V1;
 			return 0;
 		}
 		if (asprintf(&dir_path, "%s/%s/%d/%s/",
@@ -122,7 +122,7 @@ static int ibv_query_gid_type(struct ibv_context *context, uint8_t port_num,
 				 * we have an old kernel and all GIDs are
 				 * IB/RoCE v1
 				 */
-				*type = IBV_GID_TYPE_IB_ROCE_V1;
+				*type = MY_IBV_GID_TYPE_IB_ROCE_V1;
 			else
 				return -1;
 		} else {
@@ -132,9 +132,9 @@ static int ibv_query_gid_type(struct ibv_context *context, uint8_t port_num,
 		}
 	} else {
                 if (!strcmp(buff, V1_TYPE)) {
-                        *type = IBV_GID_TYPE_IB_ROCE_V1;
+                        *type = MY_IBV_GID_TYPE_IB_ROCE_V1;
                 } else if (!strcmp(buff, V2_TYPE)) {
-                        *type = IBV_GID_TYPE_ROCE_V2;
+                        *type = MY_IBV_GID_TYPE_ROCE_V2;
                 } else {
                         errno = ENOTSUP;
                         return -1;
@@ -144,7 +144,7 @@ static int ibv_query_gid_type(struct ibv_context *context, uint8_t port_num,
         return 0;
 }
 
-void ibv_find_gid_family(union ibv_gid *gid, int *gid_family)
+void my_ibv_find_gid_family(union ibv_gid *gid, int *gid_family)
 {
         if (gid->raw[0] == 0 && gid->raw[1] == 0)
                 *gid_family = AF_INET;
@@ -152,10 +152,10 @@ void ibv_find_gid_family(union ibv_gid *gid, int *gid_family)
                 *gid_family = AF_INET6;
 }
 
-int ibv_find_sgid_type(struct ibv_context *context, uint8_t port_num,
-		enum ibv_gid_type gid_type, int gid_family)
+int my_ibv_find_sgid_type(struct ibv_context *context, uint8_t port_num,
+		enum my_ibv_gid_type gid_type, int gid_family)
 {
-        enum ibv_gid_type sgid_type = 0;
+        enum my_ibv_gid_type sgid_type = 0;
         union ibv_gid sgid;
         int sgid_family = -1;
         int idx = 0;
@@ -166,12 +166,12 @@ int ibv_find_sgid_type(struct ibv_context *context, uint8_t port_num,
                         errno = EFAULT;
                         return -1;
                 }
-                if (ibv_query_gid_type(context, port_num, idx, &sgid_type)) {
+                if (my_ibv_query_gid_type(context, port_num, idx, &sgid_type)) {
                         errno = EFAULT;
                         return -1;
                 }
 
-                ibv_find_gid_family(&sgid, &sgid_family);
+                my_ibv_find_gid_family(&sgid, &sgid_family);
 
                 if (gid_type == sgid_type && gid_family == sgid_family) {
                         return idx;
@@ -182,5 +182,3 @@ int ibv_find_sgid_type(struct ibv_context *context, uint8_t port_num,
 
         return idx;
 }
-
-
