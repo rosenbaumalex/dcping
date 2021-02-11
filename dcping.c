@@ -114,8 +114,10 @@ struct dcping_cb {
 	enum ibv_mtu mtu;
 	uint8_t is_global:1;
 	uint8_t is_reserved_qpn_supp:1;
+	uint8_t is_ece_supp:1;
 	uint8_t sgid_index;
 	uint32_t reserved_qpn;
+	struct ibv_ece ece;
 
 	/* CM stuff */
 	struct rdma_event_channel *cm_channel;
@@ -219,6 +221,51 @@ static void dcping_free_buffers(struct dcping_cb *cb)
 	DEBUG_LOG("dcping_free_buffers called on cb %p\n", cb);
 	ibv_dereg_mr(cb->local_buf_mr);
 	free(cb->local_buf_addr);
+}
+
+static void dcping_ece_get_locally_set_remote(struct dcping_cb *cb, struct rdma_cm_id *cm_id)
+{
+	int ret = 0;
+	if (!cb->is_ece_supp)
+		return;
+
+	DEBUG_LOG("update ECE from QP to CM...");
+
+	ret = ibv_query_ece(cb->qp, &cb->ece);
+	if (ret) {
+		cb->is_ece_supp = 0;
+		DEBUG_LOG("NOT SUPPORTED\n");
+		return;
+	}
+	DEBUG_LOG("(%#x, %#x)\n", cb->ece.vendor_id, cb->ece.options);
+	ret = rdma_set_local_ece(cm_id, &cb->ece);
+	if (ret) {
+		perror("rdma_set_local_ece");
+		return;
+	}
+}
+
+static void dcping_ece_get_remote_set_locally(struct dcping_cb *cb, struct rdma_cm_id *cm_id)
+{
+	int ret = 0;
+	struct ibv_ece ece;
+	if (!cb->is_ece_supp)
+		return;
+
+	DEBUG_LOG("update ECE from CM responce to QP...");
+
+	ret = rdma_get_remote_ece(cm_id, &ece);
+	if (ret) {
+		cb->is_ece_supp = 0;
+		DEBUG_LOG("NOT SUPPORTED\n");
+		return;
+	}
+	DEBUG_LOG("(%#x, %#x)\n", ece.vendor_id, ece.options);
+	ibv_set_ece(cb->qp, &ece);
+	if (ret) {
+		perror("ibv_set_ece");
+		return;
+	}
 }
 
 static int dcping_create_qp(struct dcping_cb *cb)
@@ -382,7 +429,7 @@ static void dcping_free_qp(struct dcping_cb *cb)
 	ibv_dealloc_pd(cb->pd);
 }
 
-static int dcping_setup_qp(struct dcping_cb *cb)
+static int dcping_setup_qp(struct dcping_cb *cb, struct rdma_cm_id *srv_req_cm_id)
 {
 	int ret;
 	struct ibv_cq_init_attr_ex cq_attr_ex;
@@ -430,6 +477,10 @@ static int dcping_setup_qp(struct dcping_cb *cb)
 	ret = dcping_create_qp(cb);
 	if (ret) {
 		goto err4;
+	}
+
+	if (cb->is_server) {
+		dcping_ece_get_remote_set_locally(cb, srv_req_cm_id);
 	}
 
 	ret = dcping_modify_qp(cb);
@@ -628,7 +679,7 @@ static int dcping_run_server(struct dcping_cb *cb)
 				DEBUG_LOG("accepting client connection request from <%s:%d> (cm_id %p)\n", str, be16toh(rdma_get_dst_port(req_cm_id)), req_cm_id);
 
 				if (!cb->qp) {
-					ret = dcping_setup_qp(cb);
+					ret = dcping_setup_qp(cb, req_cm_id);
 					if (ret) {
 						fprintf(stderr, "setup_qp failed: %d\n", ret);
 						return ret;
@@ -641,6 +692,8 @@ static int dcping_run_server(struct dcping_cb *cb)
 						cb->remote_buf_info.dctn = htobe32(cb->qp->qp_num);
 					}
 				}
+
+				dcping_ece_get_locally_set_remote(cb, req_cm_id);
 
 				struct rdma_conn_param conn_param;
 				dcping_init_conn_param(cb, req_cm_id, &conn_param);
@@ -861,6 +914,8 @@ static int dcping_connect_client(struct dcping_cb *cb)
 	enum rdma_cm_event_type cm_event;
 	struct rdma_conn_param conn_param;
 
+	dcping_ece_get_locally_set_remote(cb, cb->cm_id);
+
 	DEBUG_LOG("rdma_connecting...\n");
 	dcping_init_conn_param(cb, cb->cm_id, &conn_param);
 	ret = rdma_connect(cb->cm_id, &conn_param);
@@ -874,6 +929,8 @@ static int dcping_connect_client(struct dcping_cb *cb)
 		perror("rdma_connect wrong responce");
 		return -1;
 	}
+
+	dcping_ece_get_remote_set_locally(cb, cb->cm_id);
 
 	DEBUG_LOG("modify QP...\n");
 	qp_attr.qp_state = IBV_QPS_RTR;
@@ -973,7 +1030,7 @@ static int dcping_run_client(struct dcping_cb *cb)
 	if (ret)
 		return ret;
 
-	ret = dcping_setup_qp(cb);
+	ret = dcping_setup_qp(cb, NULL);
 	if (ret) {
 		fprintf(stderr, "setup_qp failed: %d\n", ret);
 		return ret;
@@ -1068,6 +1125,7 @@ int main(int argc, char *argv[])
 	cb->sin.ss_family = PF_INET;
 	cb->port = htobe16(7174);
 	cb->is_reserved_qpn_supp = 1;
+	cb->is_ece_supp = 1;
 
 	opterr = 0;
 	while ((op = getopt(argc, argv, "a:I:p:C:S:D:t:scvd")) != -1) {
