@@ -205,13 +205,6 @@ static int dcping_setup_buffers(struct dcping_cb *cb)
 		goto err2;
 	}
 
-	if (cb->is_server) {
-		cb->remote_buf_info.addr = htobe64((uint64_t) (unsigned long) cb->local_buf_addr);
-		cb->remote_buf_info.size = htobe32(cb->size);
-		cb->remote_buf_info.rkey = htobe32(cb->local_buf_mr->rkey);
-		cb->remote_buf_info.dctn = htobe32(cb->qp->qp_num);
-	}
-
 	DEBUG_LOG("allocated & registered buffers...\n");
 	return 0;
 
@@ -395,13 +388,6 @@ static int dcping_setup_qp(struct dcping_cb *cb)
 	struct ibv_cq_init_attr_ex cq_attr_ex;
 	struct ibv_device_attr_ex device_attr_ex = {};
 
-	cb->pd = ibv_alloc_pd(cb->cm_id->verbs);
-	if (!cb->pd) {
-		fprintf(stderr, "ibv_alloc_pd failed\n");
-		return errno;
-	}
-	DEBUG_LOG("created pd %p\n", cb->pd);
-	
 	cb->channel = ibv_create_comp_channel(cb->cm_id->verbs);
 	if (!cb->channel) {
 		fprintf(stderr, "ibv_create_comp_channel failed\n");
@@ -587,6 +573,13 @@ static int dcping_bind_server(struct dcping_cb *cb)
 		return ret;
 	}
 
+	cb->pd = ibv_alloc_pd(cb->cm_id->verbs);
+	if (!cb->pd) {
+		fprintf(stderr, "ibv_alloc_pd failed\n");
+		return errno;
+	}
+	DEBUG_LOG("created pd %p\n", cb->pd);
+
 	return 0;
 }
 
@@ -604,12 +597,6 @@ static int dcping_run_server(struct dcping_cb *cb)
 	if (ret)
 		return ret;
 
-	ret = dcping_setup_qp(cb);
-	if (ret) {
-		fprintf(stderr, "setup_qp failed: %d\n", ret);
-		return ret;
-	}
-
 	ret = dcping_setup_buffers(cb);
 	if (ret) {
 		fprintf(stderr, "setup_buffers failed: %d\n", ret);
@@ -623,26 +610,41 @@ static int dcping_run_server(struct dcping_cb *cb)
 	// 	accept with dctn and MKey
 	while (1)
 	{
-		struct rdma_cm_id *cm_id;
+		struct rdma_cm_id *req_cm_id;
 		enum rdma_cm_event_type cm_event;
 
 		DEBUG_LOG("waiting for client events ...\n");
-		ret = dcping_handle_cm_event(cb, &cm_event, &cm_id);
+		ret = dcping_handle_cm_event(cb, &cm_event, &req_cm_id);
 		switch (cm_event) {
 
 			case RDMA_CM_EVENT_CONNECT_REQUEST:
 				if (cb->sin.ss_family == AF_INET) {
-					inet_ntop(AF_INET, &(((struct sockaddr_in *)rdma_get_peer_addr(cm_id))->sin_addr), str, sizeof(str));
+					inet_ntop(AF_INET, &(((struct sockaddr_in *)rdma_get_peer_addr(req_cm_id))->sin_addr), str, sizeof(str));
 				}
 				else {
-					inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)rdma_get_peer_addr(cm_id))->sin6_addr), str, sizeof(str));
+					inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)rdma_get_peer_addr(req_cm_id))->sin6_addr), str, sizeof(str));
 				}
 
-				DEBUG_LOG("accepting client connection request from <%s:%d> (cm_id %p)\n", str, be16toh(rdma_get_dst_port(cm_id)), cm_id);
+				DEBUG_LOG("accepting client connection request from <%s:%d> (cm_id %p)\n", str, be16toh(rdma_get_dst_port(req_cm_id)), req_cm_id);
+
+				if (!cb->qp) {
+					ret = dcping_setup_qp(cb);
+					if (ret) {
+						fprintf(stderr, "setup_qp failed: %d\n", ret);
+						return ret;
+					}
+
+					if (cb->is_server) {
+						cb->remote_buf_info.addr = htobe64((uint64_t) (unsigned long) cb->local_buf_addr);
+						cb->remote_buf_info.size = htobe32(cb->size);
+						cb->remote_buf_info.rkey = htobe32(cb->local_buf_mr->rkey);
+						cb->remote_buf_info.dctn = htobe32(cb->qp->qp_num);
+					}
+				}
 
 				struct rdma_conn_param conn_param;
-				dcping_init_conn_param(cb, cm_id, &conn_param);
-				ret = rdma_accept(cm_id, &conn_param);
+				dcping_init_conn_param(cb, req_cm_id, &conn_param);
+				ret = rdma_accept(req_cm_id, &conn_param);
 				if (ret) {
 					perror("rdma_accept");
 					goto err2;
@@ -650,17 +652,17 @@ static int dcping_run_server(struct dcping_cb *cb)
 				break;
 
 			case RDMA_CM_EVENT_ESTABLISHED:
-				printf("client connection established (cm_id %p)\n", cm_id);
+				printf("client connection established (cm_id %p)\n", req_cm_id);
 				break;
 
 			case RDMA_CM_EVENT_DISCONNECTED:
-				rdma_disconnect(cm_id);
-				rdma_destroy_id(cm_id);
+				rdma_disconnect(req_cm_id);
+				rdma_destroy_id(req_cm_id);
 				if (cb->is_reserved_qpn_supp) {
 					my_mlx5dv_reserved_qpn_dealloc(cb->cm_id->verbs, cb->reserved_qpn);
 					cb->reserved_qpn = 0;
 				}
-				if (cb->is_server) printf("client connection disconnected (cm_id %p)\n", cm_id);
+				if (cb->is_server) printf("client connection disconnected (cm_id %p)\n", req_cm_id);
 				break;
 
 			default:
@@ -873,6 +875,7 @@ static int dcping_connect_client(struct dcping_cb *cb)
 		return -1;
 	}
 
+	DEBUG_LOG("modify QP...\n");
 	qp_attr.qp_state = IBV_QPS_RTR;
 	ret = rdma_init_qp_attr(cb->cm_id, &qp_attr, &qp_attr_mask);
 	if (ret) {
@@ -951,6 +954,14 @@ static int dcping_bind_client(struct dcping_cb *cb)
         }
 
 	DEBUG_LOG("rdma_resolve_addr/rdma_resolve_route successful to server: <%s:%d>\n", str, be16toh(rdma_get_src_port(cb->cm_id)));
+
+	cb->pd = ibv_alloc_pd(cb->cm_id->verbs);
+	if (!cb->pd) {
+		fprintf(stderr, "ibv_alloc_pd failed\n");
+		return errno;
+	}
+	DEBUG_LOG("created pd %p\n", cb->pd);
+
 	return 0;
 }
 
