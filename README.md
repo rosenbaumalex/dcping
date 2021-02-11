@@ -2,14 +2,17 @@
 
 ## Description
 dcping is an example code for testing network Round Trip Time.
-It shows how to use the Mellanox DC QP to implement RDMA Write operatinos, adn the verbs extended CQ to get time stamps for each transation.
+It shows how to use the Mellanox DC QP to implement RDMA Write operatinos, and the verbs extended CQ to get time stamps for each transation.
 
 The server (passive side) application creates a DCT QP, allowing RDMA WRITE's.
 The client (active size) creates a DCI QP. Once addressing is resolved by the client, it issues 2 sequeancial's RDMA WRITE's and request a completion events. Then it will check the time-stamp diff between the 2 hardward timestamps to calculate the full RTT. It does that in a loop to get multiple results and calc min/avg/max RTT's.
 
 this example code demo's the following API's:
-1. RDMA_CM external QP for DC address resolution  
-2. [mlx5dv_create_qp()](https://github.com/linux-rdma/rdma-core/blob/master/providers/mlx5/man/mlx5dv_create_qp.3.md) for DCT & DCI  
+1. [mlx5dv_create_qp()](https://github.com/linux-rdma/rdma-core/blob/master/providers/mlx5/man/mlx5dv_create_qp.3.md) for DCT & DCI  
+2. RDMA_CM external QP for DC address resolution:  
+2a. mlx5dv_reserved_qpn_alloc()  
+2b. ibv_query_ece()/ibv_set_ece()  
+2c. rdma_set_local_ece()/rdma_get_remote_ece()  
 3. ibv_qp_ex WR's sends on the Mellanox DCI QP ([man ibv_wr_post](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_wr_post.3.md)):  
 3a. ibv_wr_start()  
 3b. ibv_wr_rdma_write()  
