@@ -112,9 +112,10 @@ struct dcping_cb {
         struct mlx5dv_qp_ex *mqpex;	/* client only */
 	struct ibv_ah *ah;		/* client only */
 	enum ibv_mtu mtu;
-	uint8_t is_global;
+	uint8_t is_global:1;
+	uint8_t is_reserved_qpn_supp:1;
 	uint8_t sgid_index;
-
+	uint32_t reserved_qpn;
 
 	/* CM stuff */
 	struct rdma_event_channel *cm_channel;
@@ -151,13 +152,26 @@ static void dcping_init_conn_param(struct dcping_cb *cb,
 {
 	uint32_t qp_num = 0;
 
-	if (cb->is_server) {
-		// fake a unique qp_num based on peer's IP addr + UDP port as we're
-		// using the same DCT as an external QPN from all RDMA_CM connection
-		qp_num = (((struct sockaddr_in *)rdma_get_peer_addr(cm_id))->sin_addr.s_addr) << 16;
-		qp_num |=  be16toh(rdma_get_dst_port(cm_id));
-	} else {
-		qp_num = cb->qp->qp_num;
+	if (cb->is_reserved_qpn_supp) {
+		int ret = my_mlx5dv_reserved_qpn_alloc(cb->cm_id->verbs, &qp_num);
+		if (ret) {
+			cb->is_reserved_qpn_supp = 0;
+			DEBUG_LOG("reserved_qpn...NOT SUPPORTED\n");
+		}
+		cb->reserved_qpn = qp_num;
+	}
+
+	if (qp_num == 0) {
+		// Fall back to some software base qp_num allocation
+
+		if (cb->is_server) {
+			// fake a unique qp_num based on peer's IP addr + UDP port as we're
+			// using the same DCT as an external QPN from all RDMA_CM connection
+			qp_num = (((struct sockaddr_in *)rdma_get_peer_addr(cm_id))->sin_addr.s_addr) << 16;
+			qp_num |=  be16toh(rdma_get_dst_port(cm_id));
+		} else {
+			qp_num = cb->qp->qp_num;
+		}
 	}
 
 	memset(conn_param, 0, sizeof(*conn_param));
@@ -642,6 +656,10 @@ static int dcping_run_server(struct dcping_cb *cb)
 			case RDMA_CM_EVENT_DISCONNECTED:
 				rdma_disconnect(cm_id);
 				rdma_destroy_id(cm_id);
+				if (cb->is_reserved_qpn_supp) {
+					my_mlx5dv_reserved_qpn_dealloc(cb->cm_id->verbs, cb->reserved_qpn);
+					cb->reserved_qpn = 0;
+				}
 				if (cb->is_server) printf("client connection disconnected (cm_id %p)\n", cm_id);
 				break;
 
@@ -1038,6 +1056,7 @@ int main(int argc, char *argv[])
 	cb->size = 64;
 	cb->sin.ss_family = PF_INET;
 	cb->port = htobe16(7174);
+	cb->is_reserved_qpn_supp = 1;
 
 	opterr = 0;
 	while ((op = getopt(argc, argv, "a:I:p:C:S:D:t:scvd")) != -1) {

@@ -36,6 +36,29 @@
 #include <sys/types.h>
 #include <dirent.h>
 
+
+#pragma weak mlx5dv_reserved_qpn_alloc
+extern int mlx5dv_reserved_qpn_alloc(struct ibv_context *ctx, uint32_t *qpn);
+int (*_my_mlx5dv_reserved_qpn_alloc)(struct ibv_context *ctx, uint32_t *qpn) = mlx5dv_reserved_qpn_alloc;
+
+int my_mlx5dv_reserved_qpn_alloc(struct ibv_context *ctx, uint32_t *qpn)
+{
+	if (_my_mlx5dv_reserved_qpn_alloc) return _my_mlx5dv_reserved_qpn_alloc(ctx, qpn);
+	else return EOPNOTSUPP;
+}
+
+#pragma weak mlx5dv_reserved_qpn_dealloc
+extern int mlx5dv_reserved_qpn_dealloc(struct ibv_context *ctx, uint32_t qpn);
+int (*_my_mlx5dv_reserved_qpn_dealloc)(struct ibv_context *ctx, uint32_t qpn) = mlx5dv_reserved_qpn_dealloc;
+
+int my_mlx5dv_reserved_qpn_dealloc(struct ibv_context *ctx, uint32_t qpn)
+{
+	if (_my_mlx5dv_reserved_qpn_dealloc) return _my_mlx5dv_reserved_qpn_dealloc(ctx, qpn);
+	else return EOPNOTSUPP;
+}
+
+
+
 enum my_ibv_gid_type {
         MY_IBV_GID_TYPE_IB_ROCE_V1,
         MY_IBV_GID_TYPE_ROCE_V2,
